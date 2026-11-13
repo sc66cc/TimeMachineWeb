@@ -1,0 +1,12 @@
+{
+  "name": "@timemachine/generated-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@timemachine/api-client": "0.1.0"
+  }
+}

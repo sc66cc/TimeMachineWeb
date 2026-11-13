@@ -1,0 +1,1283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Time Machine Web — Interactive Replica</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --blue: rgb(42, 130, 228);
+      --blue-strong: #1976d2;
+      --blue-soft: #b9dcff;
+      --ink: #15191f;
+      --muted: #7d8791;
+      --line: #c8cdd3;
+      --canvas-line: #d5cd32;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #15171a;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .viewport { position: fixed; inset: 0; overflow: hidden; background: #15171a; }
+    .stage {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 1919px;
+      height: 871px;
+      overflow: hidden;
+      background: #fff;
+      transform: translate(-50%, -50%) scale(var(--fit, 1));
+      transform-origin: center;
+      box-shadow: 0 12px 40px rgb(0 0 0 / 38%);
+    }
+    .sprite-sheet { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .icon {
+      width: 18px;
+      height: 18px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.8;
+    }
+
+    /* Top application bar */
+    .topbar {
+      position: absolute;
+      inset: 0 0 auto 0;
+      z-index: 20;
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 9px;
+      color: var(--ink);
+      background: #f2f4f7;
+      border-top: 2px solid #242830;
+      border-bottom: 1px solid #8e969e;
+    }
+    .menu-button {
+      width: 22px;
+      height: 22px;
+      border: 0;
+      border-radius: 3px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      color: #fff;
+      background: var(--blue);
+      cursor: pointer;
+    }
+    .menu-button .icon { width: 16px; height: 16px; }
+    .brand {
+      width: 88px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex: 0 0 auto;
+    }
+    .brand__seal {
+      width: 21px;
+      height: 21px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: radial-gradient(circle at 35% 30%, #76c5f3 0 9%, #2973aa 42%, #16456e 100%);
+      border: 1px solid #6a8da7;
+      font-size: 5px;
+      font-weight: 700;
+    }
+    .brand__copy {
+      max-width: 61px;
+      color: #1c2228;
+      font-size: 5.6px;
+      line-height: 1.05;
+      font-weight: 700;
+    }
+    .top-action {
+      height: 31px;
+      border: 1px solid #1780de;
+      border-radius: 3px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      color: #fff;
+      background: var(--blue);
+      box-shadow: inset 0 1px 0 rgb(255 255 255 / 18%);
+      cursor: pointer;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    .top-action:hover, .top-action:focus-visible { background: #1d75c9; }
+    .top-action .icon { width: 17px; height: 17px; }
+    .draft-pill {
+      height: 25px;
+      padding: 0 10px;
+      border-radius: 15px;
+      display: inline-flex;
+      align-items: center;
+      color: #2f78b3;
+      background: #fff;
+      border: 1px solid #b8c9da;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .draft-pill::before {
+      content: "";
+      width: 4px;
+      height: 4px;
+      margin-right: 4px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+    .project-name {
+      width: 180px;
+      height: 25px;
+      padding: 0 9px;
+      color: #20242a;
+      background: #fff;
+      border: 1px solid #aab0b7;
+      border-radius: 3px;
+      outline: none;
+      font-size: 13px;
+    }
+    .project-name:focus { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+    .app-title {
+      position: absolute;
+      top: 6px;
+      left: 50%;
+      transform: translateX(-50%);
+      height: 29px;
+      min-width: 130px;
+      display: grid;
+      place-items: center;
+      padding: 0 9px;
+      color: #101419;
+      background: #d9d9d9;
+      border-radius: 3px;
+      font-size: 18px;
+      line-height: 1;
+      font-weight: 700;
+      letter-spacing: -.2px;
+    }
+    .topbar__spacer { flex: 1; }
+    .sign-in {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-right: 1px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .sign-in__avatar {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1.5px solid #161a1f;
+      background: #fff;
+    }
+    .icon-button {
+      width: 24px;
+      height: 28px;
+      border: 0;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      color: #89919a;
+      background: transparent;
+      cursor: pointer;
+    }
+    .icon-button:hover, .icon-button:focus-visible {
+      color: var(--blue);
+      background: #e2e7ed;
+      outline: none;
+    }
+    .icon-button .icon { width: 16px; height: 16px; }
+
+    /* Compact layer sidebar */
+    .sidebar {
+      position: absolute;
+      top: 42px;
+      bottom: 94px;
+      left: 0;
+      z-index: 10;
+      width: 254px;
+      background: #f1f3f7;
+      border-right: 1px solid #aeb4bb;
+    }
+    .sidebar-tabs {
+      height: 34px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid #cdd1d6;
+      background: #f7f7f8;
+    }
+    .sidebar-tab {
+      position: relative;
+      border: 0;
+      padding: 0;
+      color: #171b20;
+      background: transparent;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .sidebar-tab::after {
+      content: "";
+      position: absolute;
+      right: 14px;
+      bottom: -1px;
+      left: 14px;
+      height: 2px;
+      background: transparent;
+    }
+    .sidebar-tab[aria-selected="true"]::after { background: var(--blue); }
+    .layer-search {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px 0 14px;
+      background: #f6f7f9;
+      border-bottom: 1px solid #c9cdd2;
+    }
+    .layer-search input {
+      min-width: 0;
+      flex: 1;
+      height: 26px;
+      padding: 0 6px;
+      border: 0;
+      color: #20252a;
+      background: transparent;
+      outline: none;
+      font-size: 12px;
+    }
+    .layer-search .icon {
+      width: 22px;
+      height: 22px;
+      color: #818b95;
+      stroke-width: 2.6;
+    }
+    .sidebar-actions {
+      height: 53px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid #d0d4d8;
+    }
+    .side-action {
+      border: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      color: #30363c;
+      background: #f5f6f8;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .side-action:hover { background: #e7edf4; }
+    .side-action .icon {
+      width: 23px;
+      height: 23px;
+      color: #89929b;
+      stroke-width: 2.1;
+    }
+    .tab-panel { height: calc(100% - 123px); overflow: auto; scrollbar-width: thin; }
+    .tab-panel[hidden] { display: none; }
+    .layer-list { padding: 1px 0; }
+    .layer-row {
+      min-height: 28px;
+      display: grid;
+      grid-template-columns: 16px 18px minmax(0, 1fr) 20px;
+      align-items: center;
+      padding: 0 6px 0 9px;
+      border-bottom: 1px solid transparent;
+      color: #24282d;
+      cursor: default;
+      font-size: 12px;
+    }
+    .layer-row:hover { background: #e5edf5; }
+    .layer-row.is-selected { background: var(--blue-soft); border-bottom-color: #91c3ee; }
+    .layer-row.is-hidden { opacity: .48; }
+    .chevron {
+      width: 12px;
+      height: 12px;
+      display: grid;
+      place-items: center;
+      color: #7b858f;
+      font-size: 17px;
+      line-height: 1;
+    }
+    .row-check {
+      width: 15px;
+      height: 15px;
+      padding: 0;
+      border: 1px solid #8f99a3;
+      border-radius: 3px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: #fff;
+      cursor: pointer;
+    }
+    .row-check[aria-pressed="true"] {
+      border-color: #5ca4e3;
+      background: #d9edff;
+      color: var(--blue);
+    }
+    .row-check[aria-pressed="true"]::before {
+      content: "✓";
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .layer-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-tool {
+      width: 19px;
+      height: 20px;
+      border: 0;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      color: #7d8790;
+      background: transparent;
+      cursor: pointer;
+    }
+    .row-tool .icon { width: 15px; height: 15px; }
+    .plate-panel { padding: 12px; color: #3a424a; font-size: 12px; }
+    .plate-card {
+      margin-bottom: 8px;
+      padding: 10px;
+      background: #fff;
+      border: 1px solid #bec5cc;
+      border-left: 4px solid var(--blue);
+      border-radius: 2px;
+    }
+    .plate-card strong { display: block; margin-bottom: 4px; font-size: 13px; }
+
+    /* Black globe canvas */
+    .workspace {
+      position: absolute;
+      top: 42px;
+      right: 0;
+      bottom: 94px;
+      left: 254px;
+      overflow: hidden;
+      background: #000;
+      border: 1px solid var(--canvas-line);
+    }
+    .workspace::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 52% 47%, rgb(24 62 79 / 9%), transparent 39%),
+        radial-gradient(circle at 83% 18%, rgb(42 130 228 / 6%), transparent 28%);
+    }
+    .module-toolbar {
+      position: absolute;
+      z-index: 5;
+      top: 6px;
+      left: 5px;
+      height: 73px;
+      display: flex;
+      align-items: stretch;
+      color: #42474d;
+      background: #fff;
+      border: 1px solid #c4c8cc;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgb(0 0 0 / 35%);
+    }
+    .module-button {
+      width: 66px;
+      border: 0;
+      border-right: 1px solid #e3e5e7;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 2px 2px 0;
+      color: #555c62;
+      background: #fff;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1.05;
+      font-weight: 700;
+      text-align: center;
+    }
+    .module-button:first-child { border-radius: 4px 0 0 4px; }
+    .module-button:hover { background: #f0f5fb; }
+    .module-button.is-active { color: #32383e; background: #f9fbfd; }
+    .module-button.is-active .module-icon {
+      color: #fff;
+      background: var(--blue);
+      border-color: var(--blue);
+    }
+    .module-icon {
+      width: 31px;
+      height: 31px;
+      display: grid;
+      place-items: center;
+      color: #81888f;
+      border-radius: 4px;
+    }
+    .module-icon .icon { width: 29px; height: 29px; stroke-width: 1.6; }
+    .toolbar-collapse {
+      width: 18px;
+      border: 0;
+      border-radius: 0 4px 4px 0;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      color: #8c959e;
+      background: #e9ecef;
+      cursor: pointer;
+      font-size: 28px;
+      line-height: 1;
+    }
+    .module-toolbar.is-collapsed .module-button { display: none; }
+    .time-readout {
+      position: absolute;
+      z-index: 4;
+      top: 82px;
+      left: 35px;
+      color: #fff;
+      font-size: 41px;
+      line-height: 1;
+      font-weight: 700;
+      letter-spacing: .3px;
+      text-shadow: 0 1px 3px #000;
+    }
+    .city-toggle {
+      position: absolute;
+      z-index: 4;
+      top: 129px;
+      left: 33px;
+      height: 25px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #e8e8e8;
+      font-size: 16px;
+      letter-spacing: .6px;
+      text-shadow: 0 1px 2px #000;
+    }
+    .city-toggle input { width: 16px; height: 16px; accent-color: var(--blue); }
+    .place-search {
+      position: absolute;
+      z-index: 4;
+      top: 166px;
+      left: 33px;
+      width: 210px;
+      height: 29px;
+      display: flex;
+      align-items: center;
+      background: #fff;
+      border: 1px solid #d5d7d8;
+    }
+    .place-search input {
+      flex: 1;
+      min-width: 0;
+      height: 100%;
+      padding: 0 7px;
+      border: 0;
+      outline: 0;
+      color: #34393f;
+      background: transparent;
+      font-size: 12px;
+      font-style: italic;
+    }
+    .place-search .icon {
+      width: 19px;
+      height: 19px;
+      margin-right: 4px;
+      color: #d7dccc;
+      stroke-width: 2.2;
+    }
+    .projection-control {
+      position: absolute;
+      z-index: 4;
+      top: 202px;
+      left: 33px;
+      width: 210px;
+      height: 29px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 7px;
+      background: #fff;
+      border: 1px solid #d5d7d8;
+      box-sizing: border-box;
+    }
+    .projection-control label {
+      color: #34393f;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .projection-control select {
+      flex: 1;
+      min-width: 0;
+      height: 100%;
+      border: 0;
+      outline: 0;
+      color: #34393f;
+      background: transparent;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    .projection-control select:focus-visible {
+      outline: 2px solid rgb(42, 130, 228);
+      outline-offset: 1px;
+    }
+    .projection-status {
+      position: absolute;
+      z-index: 4;
+      top: 236px;
+      left: 33px;
+      width: 210px;
+      margin: 0;
+      color: #dce6ea;
+      font-size: 11px;
+      text-shadow: 0 1px 2px #000;
+    }
+    .globe {
+      position: absolute;
+      z-index: 1;
+      top: 24px;
+      left: 492px;
+      width: 686px;
+      height: 686px;
+      overflow: hidden;
+      border-radius: 50%;
+      background: #153f61;
+      box-shadow: 0 0 0 1px rgb(95 191 233 / 55%), 0 0 26px rgb(29 154 222 / 12%);
+      transform: scale(var(--globe-scale, 1));
+      transform-origin: center;
+      transition: transform 140ms ease-out;
+    }
+    /* The uploaded image is used only as the scientific globe imagery, not as the UI. */
+    .globe__imagery {
+      position: absolute;
+      top: -67px;
+      left: -747px;
+      width: 1919px;
+      height: 871px;
+      max-width: none;
+      pointer-events: none;
+      user-select: none;
+    }
+    .globe.is-dimmed { filter: saturate(.7) brightness(.72); }
+    .orientation-gizmo {
+      position: absolute;
+      z-index: 3;
+      top: 67px;
+      right: 10px;
+      width: 42px;
+      height: 55px;
+      transform: rotate(-8deg);
+    }
+    .orientation-gizmo span {
+      position: absolute;
+      display: block;
+      background: #e08a6a;
+      border: 1px solid #090909;
+    }
+    .orientation-gizmo span:nth-child(1) { top: 18px; left: 4px; width: 38px; height: 13px; }
+    .orientation-gizmo span:nth-child(2) { top: 7px; left: 12px; width: 12px; height: 37px; }
+    .orientation-gizmo i {
+      position: absolute;
+      right: 0;
+      bottom: 4px;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #43b7e8;
+      border: 2px solid #d4eefa;
+    }
+    .map-caption {
+      position: absolute;
+      z-index: 3;
+      right: 0;
+      bottom: 1px;
+      left: 0;
+      color: #d3d3d3;
+      font-size: 13px;
+      text-align: center;
+      text-shadow: 0 1px 2px #000;
+      pointer-events: none;
+    }
+
+    /* Compact playback control */
+    .playback {
+      position: absolute;
+      z-index: 6;
+      bottom: 8px;
+      left: 7px;
+      width: 329px;
+      height: 83px;
+      padding: 20px 7px 6px;
+      color: #282e34;
+      background: #f0f1f3;
+      border: 1px solid #b7bcc1;
+      box-shadow: 0 1px 4px rgb(0 0 0 / 45%);
+    }
+    .playback__grip {
+      position: absolute;
+      top: 3px;
+      left: 50%;
+      width: 25px;
+      height: 11px;
+      transform: translateX(-50%);
+      color: #84909a;
+      font-size: 12px;
+      line-height: 9px;
+      letter-spacing: -1px;
+      cursor: grab;
+    }
+    .playback__row {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .time-box {
+      width: 43px;
+      height: 24px;
+      border: 1px solid #aeb4ba;
+      border-radius: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #22282e;
+      background: #fff;
+      font-size: 12px;
+    }
+    .ma-label { margin-left: -3px; color: #30363b; font-size: 12px; }
+    .transport {
+      height: 26px;
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      border: 1px solid #c2c7cc;
+      background: #f9fafb;
+    }
+    .transport button, .mini-tools button {
+      width: 26px;
+      height: 24px;
+      border: 0;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      color: #818a94;
+      background: transparent;
+      cursor: pointer;
+    }
+    .transport button:hover, .mini-tools button:hover { color: var(--blue); background: #e6edf4; }
+    .transport .icon, .mini-tools .icon { width: 17px; height: 17px; }
+    .mini-tools {
+      height: 26px;
+      display: flex;
+      align-items: center;
+      border: 1px solid #c2c7cc;
+      background: #f9fafb;
+    }
+    .zoom-control {
+      width: 56px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      border: 1px solid #c2c7cc;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #f9fafb;
+    }
+    .zoom-control button {
+      width: 27px;
+      height: 22px;
+      border: 0;
+      padding: 0;
+      color: #7d8790;
+      background: transparent;
+      cursor: pointer;
+      font-size: 22px;
+      line-height: 1;
+    }
+    .more-button {
+      width: 23px;
+      height: 23px;
+      border: 0;
+      padding: 0;
+      color: #7b858e;
+      background: transparent;
+      cursor: pointer;
+      font-size: 18px;
+      letter-spacing: -1px;
+    }
+    .age-slider { width: 145px; margin: 0; accent-color: #8b949c; }
+    .coordinate { flex: 1; color: #2d3339; font-size: 11px; white-space: nowrap; }
+
+    /* Dense geological time scale */
+    .timeline {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 25;
+      height: 94px;
+      overflow: visible;
+      background: #d7eef3;
+      border-top: 2px solid #178bde;
+    }
+    .timeline__scale {
+      position: absolute;
+      inset: 0 0 0 25px;
+      display: grid;
+      grid-template-rows: 15px 15px 17px 18px 29px;
+      border-left: 1px solid #85adb9;
+    }
+    .timeline-row { display: flex; min-width: 0; }
+    .segment {
+      min-width: 0;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      padding: 0 3px;
+      color: #24343b;
+      border-right: 1px solid rgb(255 255 255 / 72%);
+      border-bottom: 1px solid rgb(255 255 255 / 60%);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .timeline-row.stages .segment { font-size: 9px; }
+    .timeline-row.periods .segment, .timeline-row.eras .segment { font-size: 11px; }
+    .timeline-row.eon .segment { color: #173f58; font-size: 11px; }
+    .segment.is-light-text {
+      color: #fff;
+      text-shadow: 0 1px 1px rgb(0 0 0 / 42%);
+    }
+    .timeline__left-rail {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 25px;
+      z-index: 3;
+      background: #eef5f7;
+      border-right: 1px solid #8faeb8;
+    }
+    .timeline__max {
+      position: absolute;
+      top: 1px;
+      left: 1px;
+      width: 24px;
+      height: 15px;
+      border: 1px solid #8da8b2;
+      border-radius: 2px;
+      display: grid;
+      place-items: center;
+      color: #4a666e;
+      background: #fff;
+      font-size: 8px;
+    }
+    .timeline__rail-knob {
+      position: absolute;
+      top: 21px;
+      left: 3px;
+      width: 19px;
+      height: 19px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: var(--blue);
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .timeline__marker {
+      position: absolute;
+      z-index: 5;
+      top: 0;
+      bottom: 0;
+      left: calc(25px + (100% - 25px) * var(--marker, .9408));
+      width: 2px;
+      background: #fff;
+      box-shadow: 0 0 0 1px rgb(42 130 228 / 55%);
+      pointer-events: none;
+    }
+    .timeline__marker::before {
+      content: "";
+      position: absolute;
+      top: -8px;
+      left: 50%;
+      width: 17px;
+      height: 17px;
+      border: 3px solid var(--blue);
+      border-radius: 50%;
+      transform: translateX(-50%);
+      background: #fff;
+      box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
+    }
+    .timeline__bubble {
+      position: absolute;
+      z-index: 6;
+      top: -30px;
+      left: 50%;
+      min-width: 35px;
+      height: 19px;
+      padding: 0 5px;
+      border-radius: 9px;
+      display: grid;
+      place-items: center;
+      transform: translateX(-50%);
+      color: #4a4f55;
+      background: #f0f1f3;
+      box-shadow: 0 1px 2px rgb(0 0 0 / 22%);
+      font-size: 9px;
+    }
+    .timeline__zero {
+      position: absolute;
+      z-index: 6;
+      top: 1px;
+      right: 0;
+      min-width: 24px;
+      height: 15px;
+      border: 1px solid #8da8b2;
+      border-radius: 2px;
+      display: grid;
+      place-items: center;
+      color: #4a666e;
+      background: #fff;
+      font-size: 8px;
+    }
+    .timeline-hitbox {
+      position: absolute;
+      z-index: 4;
+      inset: 0 0 0 25px;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: ew-resize;
+    }
+    .toast {
+      position: absolute;
+      z-index: 80;
+      top: 50px;
+      left: 50%;
+      min-width: 230px;
+      padding: 9px 13px;
+      border-radius: 3px;
+      transform: translate(-50%, -15px);
+      color: #fff;
+      background: rgb(38 44 52 / 93%);
+      box-shadow: 0 4px 12px rgb(0 0 0 / 35%);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 150ms ease, transform 150ms ease;
+      font-size: 12px;
+      text-align: center;
+    }
+    .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
+    .visually-hidden {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      padding: 0 !important;
+      margin: -1px !important;
+      overflow: hidden !important;
+      clip: rect(0, 0, 0, 0) !important;
+      white-space: nowrap !important;
+      border: 0 !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="viewport">
+    <div class="stage" id="stage">
+      <svg class="sprite-sheet" aria-hidden="true">
+        <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+        <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m0 0L7 8m5-5 5 5"/><path d="M4 14v6h16v-6"/></symbol>
+        <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v13m0 0 5-5m-5 5-5-5"/><path d="M4 19h16"/></symbol>
+        <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+        <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-2 17.8c1.5.3 2.2-1.3 1.4-2.4-.7-.9 0-2.4 1.3-2.4H15a6 6 0 0 0 6-6c0-3.9-4-7-9-7Z"/><circle cx="7.5" cy="10" r="1"/><circle cx="10" cy="6.8" r="1"/><circle cx="14" cy="6.5" r="1"/><circle cx="17" cy="9" r="1"/></symbol>
+        <symbol id="i-layer" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m4.5 12 7.5 4 7.5-4M4.5 16l7.5 4 7.5-4"/></symbol>
+        <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3.5 10h17M5.5 6.5c4 2 9 2 13 0M12 3c3 3 4 6 4 9s-1 6-4 9c-3-3-4-6-4-9s1-6 4-9Z"/></symbol>
+        <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/><path d="m17 17 4 4"/></symbol>
+        <symbol id="i-multiglobe" viewBox="0 0 24 24"><circle cx="8" cy="7" r="3"/><circle cx="16" cy="7" r="3"/><circle cx="12" cy="15" r="3"/><path d="M9.5 9.5 11 12m3.5-2.5L13 12"/></symbol>
+        <symbol id="i-project" viewBox="0 0 24 24"><path d="M5 3h9l5 5v13H5z"/><path d="M14 3v5h5M8 12h8M8 16h8"/></symbol>
+        <symbol id="i-area" viewBox="0 0 24 24"><path d="M4 5h16v15H4zM8 3v19M16 3v19M2 10h20M2 16h20"/><circle cx="4" cy="5" r="1.5"/><circle cx="20" cy="20" r="1.5"/></symbol>
+        <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></symbol>
+        <symbol id="i-image" viewBox="0 0 24 24"><path d="M3 5h18v14H3z"/><circle cx="8" cy="10" r="2"/><path d="m5 17 5-5 3 3 2-2 4 4"/></symbol>
+        <symbol id="i-skip-back" viewBox="0 0 24 24"><path d="M6 5v14M18 6l-9 6 9 6z"/></symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></symbol>
+        <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+        <symbol id="i-skip-forward" viewBox="0 0 24 24"><path d="M18 5v14M6 6l9 6-9 6z"/></symbol>
+        <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></symbol>
+        <symbol id="i-pin" viewBox="0 0 24 24"><path d="m15 4 5 5-4 2-3 7-2-2-5 5-1-1 5-5-2-2 7-3z"/></symbol>
+        <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 17h12l-2-3V9a4 4 0 0 0-8 0v5z"/><path d="M10 20h4"/></symbol>
+        <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+      </svg>
+
+      <header class="topbar">
+        <button class="menu-button" type="button" data-toast="Main menu opened" aria-label="Open menu"><svg class="icon"><use href="#i-menu"/></svg></button>
+        <div class="brand" aria-label="Global Paleogeographic Collaboration Network">
+          <span class="brand__seal">GPCN</span>
+          <span class="brand__copy">Global Paleogeographic Collaboration Network</span>
+        </div>
+        <button class="top-action" type="button" data-toast="Saved to cloud"><svg class="icon"><use href="#i-upload"/></svg>Save to Cloud</button>
+        <span class="draft-pill">Local Draft</span>
+        <input class="project-name" value="Untitled_6/5/2025 6:10:11 AM" aria-label="Project name">
+        <div class="app-title">Time Machine</div>
+        <div class="topbar__spacer"></div>
+        <div class="sign-in"><span class="sign-in__avatar"></span><span>Not signed in</span></div>
+        <button class="top-action" type="button" data-toast="Publish panel opened"><svg class="icon"><use href="#i-upload"/></svg>Publish</button>
+        <button class="top-action" type="button" data-toast="Export options opened"><svg class="icon"><use href="#i-download"/></svg>Export</button>
+        <button class="icon-button" type="button" aria-label="Notifications" data-toast="No new notifications"><svg class="icon"><use href="#i-bell"/></svg></button>
+        <button class="icon-button" type="button" aria-label="Settings" data-toast="Settings opened"><svg class="icon"><use href="#i-gear"/></svg></button>
+        <button class="icon-button" type="button" aria-label="Information" data-toast="Time Machine Web prototype"><svg class="icon"><use href="#i-info"/></svg></button>
+      </header>
+
+      <aside class="sidebar">
+        <div class="sidebar-tabs" role="tablist" aria-label="Data views">
+          <button class="sidebar-tab" id="tab-layer" type="button" role="tab" aria-selected="true" aria-controls="panel-layer">Layer</button>
+          <button class="sidebar-tab" id="tab-plate" type="button" role="tab" aria-selected="false" aria-controls="panel-plate">Plate Model</button>
+        </div>
+        <label class="layer-search">
+          <span class="visually-hidden">Search layers</span>
+          <input id="layer-filter" type="search" autocomplete="off">
+          <svg class="icon"><use href="#i-search"/></svg>
+        </label>
+        <div class="sidebar-actions">
+          <button class="side-action" type="button" id="upload-button"><svg class="icon"><use href="#i-upload"/></svg><span>Upload to Layer</span></button>
+          <button class="side-action" type="button" data-toast="Layer Style opened"><svg class="icon"><use href="#i-palette"/></svg><span>Layer Style</span></button>
+          <input id="file-input" class="visually-hidden" type="file" multiple>
+        </div>
+        <section class="tab-panel" id="panel-layer" role="tabpanel" aria-labelledby="tab-layer">
+          <div class="layer-list">
+            <div class="layer-row is-selected" data-layer-name="1 Phanerozoic paleogeographic maps">
+              <span class="chevron"></span>
+              <button class="row-check" type="button" aria-pressed="true" aria-label="Toggle Phanerozoic layer"></button>
+              <span class="layer-name">1 Phanerozoic paleogeographic maps</span>
+              <button class="row-tool" type="button" aria-label="Open layer data"><svg class="icon"><use href="#i-image"/></svg></button>
+            </div>
+            <div class="layer-row" data-layer-name="Folder 2">
+              <span class="chevron">›</span>
+              <button class="row-check" type="button" aria-pressed="false" aria-label="Toggle Folder 2"></button>
+              <span class="layer-name">Folder 2</span>
+              <button class="row-tool" type="button" aria-label="Open Folder 2"><svg class="icon"><use href="#i-folder"/></svg></button>
+            </div>
+            <div class="layer-row" data-layer-name="Folder 1">
+              <span class="chevron">›</span>
+              <button class="row-check" type="button" aria-pressed="false" aria-label="Toggle Folder 1"></button>
+              <span class="layer-name">Folder 1</span>
+              <button class="row-tool" type="button" aria-label="Open Folder 1"><svg class="icon"><use href="#i-folder"/></svg></button>
+            </div>
+            <div class="layer-row" data-layer-name="Plate model">
+              <span class="chevron"></span>
+              <button class="row-check" type="button" aria-pressed="true" aria-label="Toggle plate model"></button>
+              <span class="layer-name">Plate model</span>
+              <span></span>
+            </div>
+          </div>
+        </section>
+        <section class="tab-panel" id="panel-plate" role="tabpanel" aria-labelledby="tab-plate" hidden>
+          <div class="plate-panel">
+            <article class="plate-card"><strong>Phanerozoic Model</strong><span>760 Ma – 2.5 Ma · active</span></article>
+            <article class="plate-card"><strong>Global Rotations</strong><span>1,842 rotation features</span></article>
+            <article class="plate-card"><strong>Static Polygons</strong><span>410 plate polygons</span></article>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace" aria-label="3D globe workspace">
+        <nav class="module-toolbar" id="module-toolbar" aria-label="Workspace modules">
+          <button class="module-button is-active" type="button" data-module="Layer"><span class="module-icon"><svg class="icon"><use href="#i-layer"/></svg></span><span>Layer</span></button>
+          <button class="module-button" type="button" data-module="Atlas"><span class="module-icon"><svg class="icon"><use href="#i-globe"/></svg></span><span>Atlas</span></button>
+          <button class="module-button" type="button" data-module="Database"><span class="module-icon"><svg class="icon"><use href="#i-database"/></svg></span><span>Database</span></button>
+          <button class="module-button" type="button" data-module="Multi Globe"><span class="module-icon"><svg class="icon"><use href="#i-multiglobe"/></svg></span><span>Multi<br>Globe</span></button>
+          <button class="module-button" type="button" data-module="Project Market"><span class="module-icon"><svg class="icon"><use href="#i-project"/></svg></span><span>Project<br>Market</span></button>
+          <button class="module-button" type="button" data-module="Area Tool"><span class="module-icon"><svg class="icon"><use href="#i-area"/></svg></span><span>Area Tool</span></button>
+          <button class="toolbar-collapse" id="toolbar-collapse" type="button" aria-label="Collapse toolbar">‹</button>
+        </nav>
+        <div class="time-readout"><span id="main-age">31.9</span> Ma</div>
+        <label class="city-toggle"><input id="city-checkbox" type="checkbox"> <span>Major cities</span></label>
+        <label class="place-search"><input type="search" placeholder="Input a place name."><svg class="icon"><use href="#i-search"/></svg></label>
+        <div class="projection-control"><label for="projection-select">Projection</label><select id="projection-select"><option value="globe">Globe (3D)</option><option value="rectangle">Rectangle</option><option value="mollweide" disabled>Mollweide</option></select></div>
+        <p class="projection-status" id="projection-status" aria-live="polite">Globe (3D)</p>
+        <div class="globe" id="globe" aria-label="Interactive paleogeographic globe">
+          <img class="globe__imagery" src="./timemachine-reference-1to1.png" alt="Paleogeographic globe imagery" draggable="false">
+        </div>
+        <div class="orientation-gizmo" aria-hidden="true"><span></span><span></span><i></i></div>
+        <section class="playback" aria-label="Time playback controls">
+          <div class="playback__grip">••••••••</div>
+          <div class="playback__row">
+            <output class="time-box" id="time-box">31.9</output><span class="ma-label">Ma</span>
+            <div class="transport">
+              <button id="previous-time" type="button" aria-label="Previous time"><svg class="icon"><use href="#i-skip-back"/></svg></button>
+              <button id="play-time" type="button" aria-label="Play"><svg class="icon"><use id="play-icon-use" href="#i-play"/></svg></button>
+              <button id="next-time" type="button" aria-label="Next time"><svg class="icon"><use href="#i-skip-forward"/></svg></button>
+            </div>
+            <div class="mini-tools">
+              <button type="button" aria-label="Playback settings" data-toast="Playback settings opened"><svg class="icon"><use href="#i-gear"/></svg></button>
+              <button type="button" aria-label="Locate" data-toast="Location tool enabled"><svg class="icon"><use href="#i-pin"/></svg></button>
+            </div>
+            <div class="zoom-control">
+              <button id="zoom-in" type="button" aria-label="Zoom in">＋</button>
+              <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+            </div>
+            <button class="more-button" type="button" aria-label="More options" data-toast="More controls opened">•••</button>
+          </div>
+          <div class="playback__row">
+            <span class="time-box">538.8</span>
+            <input class="age-slider" id="age-slider" type="range" min="0" max="538.8" step=".1" value="31.9" aria-label="Geological age">
+            <span class="time-box">0</span>
+            <span class="coordinate">(61.6°E, 31.7°N)</span>
+          </div>
+        </section>
+        <div class="map-caption">1 Phanerozoic paleogeographic maps: 760 Ma ~ -2.5 Ma</div>
+      </main>
+
+      <section class="timeline" id="timeline" aria-label="Geological time scale">
+        <div class="timeline__left-rail">
+          <span class="timeline__max">538.8</span>
+          <span class="timeline__rail-knob">↔</span>
+        </div>
+        <div class="timeline__scale">
+          <div class="timeline-row stages" id="stage-row"></div>
+          <div class="timeline-row series" id="series-row"></div>
+          <div class="timeline-row periods" id="period-row"></div>
+          <div class="timeline-row eras" id="era-row"></div>
+          <div class="timeline-row eon" id="eon-row"></div>
+        </div>
+        <button class="timeline-hitbox" id="timeline-hitbox" type="button" aria-label="Set geological age"></button>
+        <div class="timeline__marker" id="timeline-marker"><span class="timeline__bubble" id="timeline-bubble">31.9</span></div>
+        <span class="timeline__zero">0.0</span>
+      </section>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const stage = document.getElementById('stage');
+      const fitStage = () => {
+        stage.style.setProperty('--fit', String(Math.min(window.innerWidth / 1919, window.innerHeight / 871)));
+      };
+      window.addEventListener('resize', fitStage);
+      fitStage();
+
+      const toast = document.getElementById('toast');
+      let toastTimer;
+      const showToast = (message) => {
+        toast.textContent = message;
+        toast.classList.add('is-visible');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('is-visible'), 1300);
+      };
+      document.querySelectorAll('[data-toast]').forEach((button) => {
+        button.addEventListener('click', () => showToast(button.dataset.toast));
+      });
+
+      const tabLayer = document.getElementById('tab-layer');
+      const tabPlate = document.getElementById('tab-plate');
+      const panelLayer = document.getElementById('panel-layer');
+      const panelPlate = document.getElementById('panel-plate');
+      const activateTab = (name) => {
+        const layerActive = name === 'layer';
+        tabLayer.setAttribute('aria-selected', String(layerActive));
+        tabPlate.setAttribute('aria-selected', String(!layerActive));
+        panelLayer.hidden = !layerActive;
+        panelPlate.hidden = layerActive;
+      };
+      tabLayer.addEventListener('click', () => activateTab('layer'));
+      tabPlate.addEventListener('click', () => activateTab('plate'));
+
+      document.querySelectorAll('.row-check').forEach((check) => {
+        check.addEventListener('click', () => {
+          const next = check.getAttribute('aria-pressed') !== 'true';
+          check.setAttribute('aria-pressed', String(next));
+          check.closest('.layer-row')?.classList.toggle('is-hidden', !next);
+        });
+      });
+      document.getElementById('layer-filter').addEventListener('input', (event) => {
+        const term = event.target.value.trim().toLowerCase();
+        document.querySelectorAll('[data-layer-name]').forEach((row) => {
+          row.hidden = !row.dataset.layerName.toLowerCase().includes(term);
+        });
+      });
+      const fileInput = document.getElementById('file-input');
+      document.getElementById('upload-button').addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) showToast(`${fileInput.files.length} file(s) selected`);
+      });
+
+      document.querySelectorAll('.module-button').forEach((button) => {
+        button.addEventListener('click', () => {
+          document.querySelectorAll('.module-button').forEach((item) => item.classList.remove('is-active'));
+          button.classList.add('is-active');
+          showToast(`${button.dataset.module} selected`);
+        });
+      });
+      const toolbar = document.getElementById('module-toolbar');
+      const collapse = document.getElementById('toolbar-collapse');
+      collapse.addEventListener('click', () => {
+        const collapsed = toolbar.classList.toggle('is-collapsed');
+        collapse.textContent = collapsed ? '›' : '‹';
+      });
+
+      const globe = document.getElementById('globe');
+      document.getElementById('city-checkbox').addEventListener('change', (event) => {
+        globe.classList.toggle('is-dimmed', event.target.checked);
+        showToast(event.target.checked ? 'Major cities enabled' : 'Major cities hidden');
+      });
+      const projectionSelect = document.getElementById('projection-select');
+      const projectionStatus = document.getElementById('projection-status');
+      const projectionLabels = { globe: 'Globe (3D)', rectangle: 'Rectangle', mollweide: 'Mollweide' };
+      projectionSelect.addEventListener('change', (event) => {
+        const value = event.target.value;
+        if (value === 'mollweide') {
+          projectionStatus.textContent = 'Mollweide is not implemented yet.';
+          event.target.value = 'globe';
+          return;
+        }
+        projectionStatus.textContent = projectionLabels[value] || value;
+      });
+      let globeScale = 1;
+      const setGlobeScale = (next) => {
+        globeScale = Math.max(.78, Math.min(1.28, next));
+        globe.style.setProperty('--globe-scale', globeScale.toFixed(2));
+      };
+      document.getElementById('zoom-in').addEventListener('click', () => setGlobeScale(globeScale + .05));
+      document.getElementById('zoom-out').addEventListener('click', () => setGlobeScale(globeScale - .05));
+
+      const mainAge = document.getElementById('main-age');
+      const timeBox = document.getElementById('time-box');
+      const ageSlider = document.getElementById('age-slider');
+      const marker = document.getElementById('timeline-marker');
+      const bubble = document.getElementById('timeline-bubble');
+      let currentAge = 31.9;
+      const maxAge = 538.8;
+      const setAge = (age) => {
+        currentAge = Math.max(0, Math.min(maxAge, Number(age)));
+        const label = currentAge.toFixed(1).replace(/\.0$/, '');
+        mainAge.textContent = String(Math.round(currentAge));
+        timeBox.textContent = label;
+        bubble.textContent = label;
+        ageSlider.value = currentAge.toFixed(1);
+        marker.style.setProperty('--marker', String(1 - currentAge / maxAge));
+      };
+      ageSlider.addEventListener('input', () => setAge(ageSlider.value));
+      document.getElementById('previous-time').addEventListener('click', () => setAge(currentAge + 1));
+      document.getElementById('next-time').addEventListener('click', () => setAge(currentAge - 1));
+
+      const playButton = document.getElementById('play-time');
+      const playIcon = document.getElementById('play-icon-use');
+      let playTimer = null;
+      const stopPlayback = () => {
+        clearInterval(playTimer);
+        playTimer = null;
+        playIcon.setAttribute('href', '#i-play');
+        playButton.setAttribute('aria-label', 'Play');
+      };
+      playButton.addEventListener('click', () => {
+        if (playTimer) return stopPlayback();
+        playIcon.setAttribute('href', '#i-pause');
+        playButton.setAttribute('aria-label', 'Pause');
+        playTimer = setInterval(() => {
+          if (currentAge <= 0) return stopPlayback();
+          setAge(currentAge - .4);
+        }, 90);
+      });
+
+      const timelineHitbox = document.getElementById('timeline-hitbox');
+      timelineHitbox.addEventListener('pointerdown', (event) => {
+        const rect = timelineHitbox.getBoundingClientRect();
+        const update = (pointerEvent) => {
+          const ratio = Math.max(0, Math.min(1, (pointerEvent.clientX - rect.left) / rect.width));
+          setAge((1 - ratio) * maxAge);
+        };
+        update(event);
+        timelineHitbox.setPointerCapture(event.pointerId);
+        timelineHitbox.addEventListener('pointermove', update);
+        timelineHitbox.addEventListener('pointerup', () => {
+          timelineHitbox.removeEventListener('pointermove', update);
+        }, { once: true });
+      });
+
+      const colors = {
+        cambrian: '#8fc9ad', ordovician: '#4fae9e', silurian: '#9ccbc6',
+        devonian: '#d8bc77', carboniferous: '#8db6ad', permian: '#dd8084',
+        triassic: '#9666bb', jurassic: '#58afd0', cretaceous: '#77bf73',
+        paleogene: '#dfa764', neogene: '#dcec42'
+      };
+      const addSegments = (rowId, segments) => {
+        const row = document.getElementById(rowId);
+        segments.forEach(([label, weight, color]) => {
+          const segment = document.createElement('span');
+          segment.className = 'segment';
+          segment.textContent = label;
+          segment.style.flex = `${weight} 1 0`;
+          segment.style.background = color;
+          const channel = (start) => parseInt(color.slice(start, start + 2), 16) / 255;
+          const linear = (value) => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
+          const luminance = .2126 * linear(channel(1)) + .7152 * linear(channel(3)) + .0722 * linear(channel(5));
+          segment.classList.toggle('is-light-text', luminance < .36);
+          segment.title = label;
+          row.appendChild(segment);
+        });
+      };
+      addSegments('stage-row', [
+        ['Fo…',7,'#9acbb1'],['C…',6,'#8fc9ad'],['…',4,'#a4d4b9'],['…',4,'#9dceb3'],['Tr…',7,'#4fae9e'],
+        ['Dar…',8,'#5ab2a5'],['K…',7,'#6ab9ad'],['…',7,'#9ccbc6'],['…',5,'#b6d8d1'],['Emsian',9,'#d8bc77'],
+        ['Ei…',6,'#d5bb79'],['…',6,'#ddc88d'],['F…',7,'#cabf8f'],['Fa…',7,'#d5c690'],['Tour…',9,'#8db6ad'],
+        ['Visean',10,'#92b9ae'],['…',7,'#93b2ad'],['B…',7,'#8baaa7'],['M…',6,'#8ea7a5'],['…',5,'#96aaa8'],
+        ['…',5,'#df868b'],['…',5,'#db8386'],['K…',7,'#dd8084'],['…',5,'#d7777e'],['…',5,'#c0708c'],
+        ['…',5,'#9968b4'],['…',5,'#9464b5'],['Ca…',8,'#9d78bd'],['Norian',13,'#9f89c6'],['…',6,'#58afd0'],
+        ['Pl…',7,'#58b3d3'],['To…',7,'#69b9d6'],['…',7,'#77bfd8'],['…',7,'#78bed4'],['…',7,'#76c1d7'],
+        ['…',6,'#78bf87'],['…',6,'#74bd77'],['A…',7,'#82c779'],['Albian',10,'#8dca79'],['…',7,'#9bcf74'],
+        ['Ca…',8,'#a4d66f'],['…',6,'#c5da75'],['…',6,'#dfa764'],['Y…',6,'#dda36d'],['L…',6,'#d6a779'],
+        ['…',6,'#dfb38b'],['Oli…',7,'#dfb57b'],['…',6,'#d7c98a'],['…',5,'#dcec42'],['Miocene',10,'#e5ee4a'],['Neogene',9,'#e2ed38']
+      ]);
+      addSegments('series-row', [
+        ['Terrene…',13,'#9acbb1'],['Ca…',8,'#8fc9ad'],['Mid…',8,'#88c5a6'],['Fur…',8,'#7fbea1'],
+        ['Early O…',11,'#4fae9e'],['Midd…',10,'#51ae9f'],['Late O…',10,'#5ab2a5'],['Lla…',9,'#9ccbc6'],['…',9,'#b2d5cf'],
+        ['Early Devoni…',17,'#d8bc77'],['Middl…',11,'#dcc383'],['Late Dev…',15,'#d6c68e'],['Mississippian',21,'#8db6ad'],
+        ['Pennsylvani…',19,'#85aaa5'],['Cisuralian',14,'#dd8084'],['Guad…',12,'#d67980'],['L…',8,'#cc7380'],
+        ['Mi…',10,'#9666bb'],['Late Triassic',21,'#9c79bd'],['Early Jurassic',18,'#58afd0'],['Midd…',12,'#64b5d3'],
+        ['Late Jur…',16,'#72bed7'],['Early Cretaceous',26,'#77bf73'],['Late Cretaceous',26,'#91cd6e'],
+        ['Pal…',10,'#dfa764'],['Eocene',15,'#daa56d'],['Oli…',9,'#dab37b'],['…',6,'#d8ce82'],['Miocene',15,'#dcec42'],['Neogene',11,'#e4ed43']
+      ]);
+      addSegments('period-row', [
+        ['Cambrian',53.4,colors.cambrian],['Ordovician',41.6,colors.ordovician],['Silurian',24.6,colors.silurian],
+        ['Devonian',60.3,colors.devonian],['Carboniferous',60,colors.carboniferous],['Permian',47,colors.permian],
+        ['Triassic',50.6,colors.triassic],['Jurassic',56.3,colors.jurassic],['Cretaceous',79,colors.cretaceous],
+        ['Paleogene',43,colors.paleogene],['Neogene',23,colors.neogene]
+      ]);
+      addSegments('era-row', [
+        ['Paleozoic',287,'#80bcb1'],['Mesozoic',186,'#68b9cf'],['Cenozoic',65.8,'#bbd742']
+      ]);
+      addSegments('eon-row', [['Phanerozoic',538.8,'#75bed4']]);
+      setAge(31.9);
+    })();
+  </script>
+</body>
+</html>

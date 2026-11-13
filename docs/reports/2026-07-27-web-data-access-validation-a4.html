@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>TimeMachine 地学数据 Web 接入与性能验证阶段报告</title>
+    <style>
+      @page { size: A4; margin: 10mm 11mm 9mm; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        color: #17222b;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+          "Microsoft YaHei", Arial, sans-serif;
+        font-size: 9.15pt;
+        line-height: 1.37;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        padding-bottom: 5px;
+        border-bottom: 2px solid #1d6e8c;
+      }
+      h1 {
+        margin: 0;
+        white-space: nowrap;
+        font-size: 15.3pt;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+      .meta { color: #58707e; font-size: 7.8pt; text-align: right; }
+      .decision {
+        margin: 8px 0 7px;
+        padding: 7px 9px;
+        border-left: 4px solid #d89436;
+        background: #f6f2e9;
+        font-size: 9.3pt;
+      }
+      h2 {
+        margin: 8px 0 5px;
+        color: #155a73;
+        font-size: 11pt;
+        line-height: 1.15;
+      }
+      table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      th, td {
+        padding: 4px 5px;
+        border: 1px solid #b9c9d1;
+        vertical-align: top;
+      }
+      th {
+        color: #0f485d;
+        background: #e8f1f4;
+        font-weight: 700;
+        text-align: left;
+      }
+      .evidence th:nth-child(1) { width: 15%; }
+      .evidence th:nth-child(2) { width: 58%; }
+      .evidence th:nth-child(3) { width: 27%; }
+      .compare th:nth-child(1) { width: 14%; }
+      .compare th:nth-child(2), .compare th:nth-child(3) { width: 43%; }
+      .note {
+        margin: 5px 0 0;
+        padding: 5px 7px;
+        color: #5c4b24;
+        background: #fff7df;
+        font-size: 8.1pt;
+      }
+      ol { margin: 3px 0 0 18px; padding: 0; }
+      li { margin: 3px 0; padding-left: 2px; }
+      footer {
+        margin-top: 5px;
+        padding-top: 4px;
+        border-top: 1px solid #b9c9d1;
+        color: #607581;
+        font-size: 7.3pt;
+        text-align: right;
+      }
+      strong { color: #102f3c; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>TimeMachine 地学数据 Web 接入与性能验证阶段报告</h1>
+      </div>
+      <div class="meta">2026-07-27<br />盆地 · 板块 · PBDB · 图集 · Raster</div>
+    </header>
+
+    <div class="decision">
+      <strong>核心判断：</strong>Web/Cesium + Martin 已从概念验证推进到可组合的数据底座，
+      适合作为在线浏览、检索、分享和轻量分析主入口；Unity 不宜立即整体替换，应保留为
+      高端渲染、离线分析和专业工作站。建议形成“<strong>双前端、一数据底座</strong>”。
+    </div>
+
+    <h2>一、已验证成果</h2>
+    <table class="evidence">
+      <thead>
+        <tr><th>对象</th><th>关键结果</th><th>阶段结论</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>盆地/板块地图</td>
+          <td>PostGIS → Martin MVT → MapLibre 链路打通；完成跨 180° 经线异常识别与接缝策略验证。</td>
+          <td>可按视口发布矢量瓦片，避免全量 GeoJSON。</td>
+        </tr>
+        <tr>
+          <td>球面板块重建</td>
+          <td>503 个多边形、649,905 个三角面、241 个 Plate ID；0–1100 Ma；pyGPlates 黄金坐标误差达小数点后 8–9 位。</td>
+          <td>刚性有限旋转、重建树、四元数与拾取链路正确。</td>
+        </tr>
+        <tr>
+          <td>PBDB 大规模点</td>
+          <td>275,347 行接受 275,291 行；186 个 Plate ID；WGP1 覆盖 10k–5M 点，5M 约 95.4 MiB，单 buffer / 单 draw call。</td>
+          <td>CPU 时间更新由点数 N 降为活动板块数 P。</td>
+        </tr>
+        <tr>
+          <td>时间图集</td>
+          <td>90 个真实帧生成 JPEG 95、z0–z4 MBTiles（约 302 MiB）；151 个 5 Ma 节点；4,314 次瓦片请求通过。</td>
+          <td>支持按需加载、最近真实帧解析和邻帧预热。</td>
+        </tr>
+        <tr>
+          <td>标量 Raster+CPT</td>
+          <td>9 个栅格、8 组色带生成 PNG MBTiles（约 66 MiB）；NoData 透明；346 次请求通过，34 个 HTTP 204 符合预期。</td>
+          <td>NetCDF/GeoTIFF、色带和透明区可统一进入数字地球。</td>
+        </tr>
+        <tr>
+          <td>工程质量</td>
+          <td>13 个测试文件、57 项测试通过；TypeScript 与 Vite production build 通过。</td>
+          <td>已形成可持续回归的 Web runtime。</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">
+      <strong>性能口径：</strong>自动化浏览器使用 SwiftShader，只证明 5M 点、Raster
+      和图集链路可加载、可交互、无 WebGL 错误；不能替代目标显卡上的 FPS、P95 帧时和显存验收。
+    </div>
+
+    <h2>二、与当前 Unity 方案对比</h2>
+    <table class="compare">
+      <thead><tr><th>维度</th><th>Web/Cesium + Martin</th><th>当前 Unity 方案</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>访问发布</td>
+          <td>零安装、URL 即开即用；易接入 Nginx、CDN、权限与业务页面。</td>
+          <td>需安装、打包和升级；但离线运行与环境可控性更强。</td>
+        </tr>
+        <tr>
+          <td>大数据链路</td>
+          <td>MVT/MBTiles/manifest 按视口和时间加载，适合在线数据服务。</td>
+          <td>现有全量 RPC、整幅 GZIP PNG、完整 LayerList 保存方式在大数据下压力较高。</td>
+        </tr>
+        <tr>
+          <td>渲染性能</td>
+          <td>Worker + GPU buffer + shader；跨平台，但受 WebGL、浏览器内存和 GPU 配额约束。</td>
+          <td>原生 GPU、Compute Shader、内存控制和性能分析更强，适合极限规模和高保真效果。</td>
+        </tr>
+        <tr>
+          <td>产品迭代</td>
+          <td>Vue/TypeScript 易整合搜索、目录、协作和云项目，部署迭代快。</td>
+          <td>3D 交互成熟，但业务 UI、Web 分享和多端交付成本较高。</td>
+        </tr>
+        <tr>
+          <td>科学场景</td>
+          <td>已验证刚性板块重建，适合标准化在线复现。</td>
+          <td>更适合复杂桌面工作流、离线计算和高阶可视化；两端均需补充变形网络。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>三、建议与下一步</h2>
+    <ol>
+      <li><strong>双前端：</strong>Web 做默认在线入口，Unity 做专业工作站；统一引用 DatasetVersion、PlateModelVersion 与 RasterTileSet。</li>
+      <li><strong>生产化：</strong>固化 PostGIS + 只读 Martin + Nginx/HTTPS + 对象存储/CDN；导入改为异步 Job 和不可变 manifest。</li>
+      <li><strong>同机 A/B：</strong>用相同数据、相机和硬件测试 275k/1M/5M 点与 90 帧图集，统一记录首屏、FPS、P95、CPU/GPU 内存和交互延迟。</li>
+      <li><strong>科学正确性：</strong>持续用 pyGPlates 校验多 Plate ID、多年代、反经线与球面接缝；复杂变形和连续时间 Raster 先服务端派生。</li>
+    </ol>
+    <footer>TimeMachine Data Platform · Web Data Access &amp; Performance Validation</footer>
+  </body>
+</html>

@@ -1,0 +1,483 @@
+/**
+ * Stable action identifiers and parameter shapes.
+ *
+ * The UI and `window.timeMachineAgent` both dispatch through these ids, so the
+ * list below is the single inventory of what the app can do. Add a new entry
+ * here before wiring a button to it.
+ */
+
+export const AGENT_ACTIONS = {
+  authDialogClose: "ui.authDialog.close",
+  authDialogOpen: "ui.authDialog.open",
+  authLogin: "auth.login",
+  authLogout: "auth.logout",
+  authModeSet: "ui.authMode.set",
+  authSendCode: "auth.sendCode",
+  accountMenuSetVisible: "ui.accountMenu.setVisible",
+  accountMenuToggle: "ui.accountMenu.toggle",
+  cameraReset: "camera.reset",
+  catalogRefresh: "catalog.refresh",
+  datasetSelect: "dataset.select",
+  exportPlaceholder: "export.run",
+  layerGroupCollapse: "layer.group.setCollapsed",
+  layerGroupOpacity: "layer.group.setOpacity",
+  layerGroupVisibility: "layer.group.setVisibility",
+  layerMoveToGroup: "layer.setGroup",
+  layerOpacity: "layer.setOpacity",
+  layerOrder: "layer.setOrder",
+  layerSearchSet: "ui.layerSearch.set",
+  layerStyleOpen: "ui.layerStyle.open",
+  layerVisibility: "layer.setVisibility",
+  majorCitiesSetVisible: "ui.majorCities.setVisible",
+  moduleSelect: "ui.module.select",
+  modelSelect: "model.select",
+  placeSearch: "ui.placeSearch",
+  pointsLoad: "points.load",
+  pointsSelectDataset: "points.selectDataset",
+  pointsSetSize: "points.setSize",
+  pointsSetStyle: "points.setStyle",
+  pointsUnload: "points.unload",
+  projectOpen: "project.open",
+  projectionSelect: "projection.select",
+  projectSave: "project.save",
+  projectSetName: "project.setName",
+  publishPlaceholder: "publish.run",
+  rasterSelect: "raster.select",
+  sidebarSelect: "ui.sidebar.select",
+  timeSet: "time.set",
+  timeSetPlaying: "time.setPlaying",
+  timeSetSpeed: "time.setSpeed",
+  toolbarToggle: "ui.toolbar.toggle",
+  uiInfoOpen: "ui.info.open",
+  uiMenuToggle: "ui.menu.toggle",
+  uiNotificationsOpen: "ui.notifications.open",
+  uiSettingsOpen: "ui.settings.open",
+  uploadBack: "ui.upload.back",
+  uploadCancel: "upload.cancel",
+  uploadClose: "upload.close",
+  uploadOpen: "upload.open",
+  uploadRun: "upload.run",
+} as const;
+
+export type AgentActionId = (typeof AGENT_ACTIONS)[keyof typeof AGENT_ACTIONS];
+
+/** Human-readable titles, kept beside the ids so the two cannot drift. */
+export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
+  [AGENT_ACTIONS.accountMenuSetVisible]: "Show or hide the account menu",
+  [AGENT_ACTIONS.accountMenuToggle]: "Toggle the account menu or open the sign-in dialog",
+  [AGENT_ACTIONS.authDialogClose]: "Close the sign-in dialog",
+  [AGENT_ACTIONS.authDialogOpen]: "Open the sign-in dialog",
+  [AGENT_ACTIONS.authLogin]: "Sign in",
+  [AGENT_ACTIONS.authLogout]: "Sign out",
+  [AGENT_ACTIONS.authModeSet]: "Switch the sign-in method",
+  [AGENT_ACTIONS.authSendCode]: "Send an email verification code",
+  [AGENT_ACTIONS.cameraReset]: "Reset the globe to the home view",
+  [AGENT_ACTIONS.catalogRefresh]: "Refresh the plate model catalog",
+  [AGENT_ACTIONS.datasetSelect]: "Select a versioned point dataset",
+  [AGENT_ACTIONS.exportPlaceholder]: "Export the project",
+  [AGENT_ACTIONS.layerGroupCollapse]: "Collapse or expand a layer group",
+  [AGENT_ACTIONS.layerGroupOpacity]: "Set a layer group opacity",
+  [AGENT_ACTIONS.layerGroupVisibility]: "Show or hide a layer group",
+  [AGENT_ACTIONS.layerMoveToGroup]: "Move a layer into another group",
+  [AGENT_ACTIONS.layerOpacity]: "Set a layer opacity",
+  [AGENT_ACTIONS.layerOrder]: "Reorder layers",
+  [AGENT_ACTIONS.layerSearchSet]: "Filter the layer list",
+  [AGENT_ACTIONS.layerStyleOpen]: "Open a layer's style panel",
+  [AGENT_ACTIONS.layerVisibility]: "Show or hide a layer",
+  [AGENT_ACTIONS.majorCitiesSetVisible]: "Show or hide major cities",
+  [AGENT_ACTIONS.moduleSelect]: "Select a workspace module",
+  [AGENT_ACTIONS.modelSelect]: "Select the plate model to load",
+  [AGENT_ACTIONS.placeSearch]: "Search for a place on the globe",
+  [AGENT_ACTIONS.pointsLoad]: "Load the selected point dataset",
+  [AGENT_ACTIONS.pointsSelectDataset]: "Select the local benchmark point dataset",
+  [AGENT_ACTIONS.pointsSetSize]: "Set the point size in pixels",
+  [AGENT_ACTIONS.pointsSetStyle]: "Set the point style expression",
+  [AGENT_ACTIONS.pointsUnload]: "Unload the point dataset",
+  [AGENT_ACTIONS.projectOpen]: "Open a cloud project revision",
+  [AGENT_ACTIONS.projectionSelect]: "Switch the map projection",
+  [AGENT_ACTIONS.projectSave]: "Save the project to the cloud",
+  [AGENT_ACTIONS.projectSetName]: "Rename the project",
+  [AGENT_ACTIONS.publishPlaceholder]: "Publish the project",
+  [AGENT_ACTIONS.rasterSelect]: "Select the single raster layer source",
+  [AGENT_ACTIONS.sidebarSelect]: "Switch the sidebar tab",
+  [AGENT_ACTIONS.timeSet]: "Set the geological age",
+  [AGENT_ACTIONS.timeSetPlaying]: "Play or pause the time animation",
+  [AGENT_ACTIONS.timeSetSpeed]: "Set the playback speed",
+  [AGENT_ACTIONS.toolbarToggle]: "Collapse or expand the module toolbar",
+  [AGENT_ACTIONS.uiInfoOpen]: "Show the information panel",
+  [AGENT_ACTIONS.uiMenuToggle]: "Open the main menu",
+  [AGENT_ACTIONS.uiNotificationsOpen]: "Show notifications",
+  [AGENT_ACTIONS.uiSettingsOpen]: "Open settings",
+  [AGENT_ACTIONS.uploadBack]: "Go back one step in the upload wizard",
+  [AGENT_ACTIONS.uploadCancel]: "Cancel the running ingest job",
+  [AGENT_ACTIONS.uploadClose]: "Close the upload wizard",
+  [AGENT_ACTIONS.uploadOpen]: "Open the upload wizard",
+  [AGENT_ACTIONS.uploadRun]: "Run the dataset ingest",
+};
+
+import { agentActions } from "./registry";
+import type { AgentActionDefinition, AgentActionParam } from "./types";
+
+interface Declaration {
+  description: string;
+  id: AgentActionId;
+  params: readonly AgentActionParam[];
+}
+
+const NUM = (name: string, description: string, required = true): AgentActionParam => ({
+  description,
+  name,
+  required,
+  type: "number",
+});
+
+const BOOL = (name: string, description: string): AgentActionParam => ({
+  description,
+  name,
+  required: true,
+  type: "boolean",
+});
+
+const STR = (
+  name: string,
+  description: string,
+  required = true,
+): AgentActionParam => ({ description, name, required, type: "string" });
+
+const ARR = (
+  name: string,
+  description: string,
+  required = true,
+): AgentActionParam => ({ description, name, required, type: "array" });
+
+const OBJ = (
+  name: string,
+  description: string,
+  required = true,
+): AgentActionParam => ({ description, name, required, type: "object" });
+
+/**
+ * Declares every action at import time so `listActions()` reports a stable
+ * inventory before any UI has mounted. Handlers are attached later by the UI
+ * through `agentActions.register`; until then an action is reported as
+ * unsupported rather than silently missing.
+ */
+const DECLARATIONS: readonly Declaration[] = [
+  {
+    description: "Sign in with a Unity account/password or an email verification code.",
+    id: AGENT_ACTIONS.authLogin,
+    params: [
+      STR("mode", "'account' (default) or 'email-code'.", false),
+      STR("account", "Unity account name (account mode).", false),
+      STR("password", "Plain password; never stored or logged.", false),
+      STR("email", "Email address (email-code mode).", false),
+      STR("code", "Verification code (email-code mode).", false),
+    ],
+  },
+  {
+    description: "Send an email verification code.",
+    id: AGENT_ACTIONS.authSendCode,
+    params: [STR("email", "Email address.")],
+  },
+  { description: "Sign out and reload the public catalog.", id: AGENT_ACTIONS.authLogout, params: [] },
+  {
+    description:
+      "Reload the shared plate model catalog (public pages plus the user's own).",
+    id: AGENT_ACTIONS.catalogRefresh,
+    params: [],
+  },
+  {
+    description:
+      "Select the plate model to load. Reloads the page, so wait for bootId to change.",
+    id: AGENT_ACTIONS.modelSelect,
+    params: [
+      STR("source", "'shared' (default), 'v2' or 'local-demo'.", false),
+      NUM("plateModelId", "Shared plate model ID (source 'shared').", false),
+      NUM("versionId", "Versioned plate model ID (source 'v2').", false),
+    ],
+  },
+  {
+    description: "Select a versioned point dataset. Reloads the page.",
+    id: AGENT_ACTIONS.datasetSelect,
+    params: [NUM("datasetVersionId", "Versioned dataset ID.")],
+  },
+  {
+    description:
+      "Save the project to the cloud. Requires the TimeMachine V2 workspace endpoints.",
+    id: AGENT_ACTIONS.projectSave,
+    params: [],
+  },
+  {
+    description:
+      "Open a cloud project revision. Requires the TimeMachine V2 workspace endpoints.",
+    id: AGENT_ACTIONS.projectOpen,
+    params: [NUM("revisionId", "Revision ID.")],
+  },
+  {
+    description:
+      "Switch the map projection. Shares the UI select's handler. 'globe' keeps the 3D scene; 'rectangle' is the native 2D Plate Carree view and needs every points/raster/atlas layer turned off; 'mollweide' is not implemented and answers unsupported.",
+    id: AGENT_ACTIONS.projectionSelect,
+    params: [STR("projectionId", "'globe', 'rectangle' or 'mollweide'.")],
+  },
+  {
+    description: "Set the geological age in Ma.",
+    id: AGENT_ACTIONS.timeSet,
+    params: [NUM("ageMa", "Age in Ma.")],
+  },
+  {
+    description: "Start or pause the geological time animation.",
+    id: AGENT_ACTIONS.timeSetPlaying,
+    params: [BOOL("playing", "True to play, false to pause.")],
+  },
+  {
+    description: "Set the playback speed in Ma per second.",
+    id: AGENT_ACTIONS.timeSetSpeed,
+    params: [NUM("speedMaPerSecond", "Speed in Ma per second.")],
+  },
+  {
+    description: "Reset the globe to the home view.",
+    id: AGENT_ACTIONS.cameraReset,
+    params: [],
+  },
+  {
+    description: "Show or hide a layer.",
+    id: AGENT_ACTIONS.layerVisibility,
+    params: [NUM("layerId", "Layer id."), BOOL("active", "True to show.")],
+  },
+  {
+    description: "Set a layer opacity between 0 and 1.",
+    id: AGENT_ACTIONS.layerOpacity,
+    params: [NUM("layerId", "Layer id."), NUM("alpha", "Opacity in [0, 1].")],
+  },
+  {
+    description: "Show or hide a layer group.",
+    id: AGENT_ACTIONS.layerGroupVisibility,
+    params: [NUM("groupId", "Group id."), BOOL("active", "True to show.")],
+  },
+  {
+    description: "Set a layer group opacity between 0 and 1.",
+    id: AGENT_ACTIONS.layerGroupOpacity,
+    params: [NUM("groupId", "Group id."), NUM("alpha", "Opacity in [0, 1].")],
+  },
+  {
+    description: "Collapse or expand a layer group.",
+    id: AGENT_ACTIONS.layerGroupCollapse,
+    params: [NUM("groupId", "Group id."), BOOL("collapsed", "True to collapse.")],
+  },
+  {
+    description:
+      "Reorder layers by their full ordered id list. `groupIdByLayer` is optional and moves a layer between groups while reordering, exactly like a drag-and-drop in the sidebar.",
+    id: AGENT_ACTIONS.layerOrder,
+    params: [
+      ARR("orderedIds", "Every layer id, in the new order."),
+      OBJ(
+        "groupIdByLayer",
+        "Optional map of layer id to target group id (101 data, 102 reconstruction).",
+        false,
+      ),
+    ],
+  },
+  {
+    description: "Move a layer into another group without reordering.",
+    id: AGENT_ACTIONS.layerMoveToGroup,
+    params: [NUM("layerId", "Layer id."), NUM("groupId", "Target group id.")],
+  },
+  {
+    description: "Load the selected point dataset.",
+    id: AGENT_ACTIONS.pointsLoad,
+    params: [],
+  },
+  {
+    description: "Unload the point dataset.",
+    id: AGENT_ACTIONS.pointsUnload,
+    params: [],
+  },
+  {
+    description: "Open the dataset upload wizard. Requires the V2 ingest endpoints.",
+    id: AGENT_ACTIONS.uploadOpen,
+    params: [],
+  },
+  { description: "Close the dataset upload wizard.", id: AGENT_ACTIONS.uploadClose, params: [] },
+  {
+    description:
+      "Run the dataset ingest. The source file may be passed directly as a browser File/Blob, so no DOM interaction is required. Requires the V2 ingest endpoints.",
+    id: AGENT_ACTIONS.uploadRun,
+    params: [
+      OBJ("file", "Browser File or Blob holding the CSV/TSV/TXT payload.", false),
+      STR("name", "Dataset name.", false),
+      STR("description", "Dataset description.", false),
+      NUM("plateModelId", "Plate model the dataset binds to.", false),
+      OBJ("mapping", "Column mapping override.", false),
+    ],
+  },
+  {
+    description: "Cancel the running ingest job. Requires the V2 ingest endpoints.",
+    id: AGENT_ACTIONS.uploadCancel,
+    params: [],
+  },
+  { description: "Switch the sidebar tab.", id: AGENT_ACTIONS.sidebarSelect, params: [STR("tab", "'layers' or 'plate-models'.")] },
+  {
+    description: "Filter the sidebar layer list by a substring.",
+    id: AGENT_ACTIONS.layerSearchSet,
+    params: [STR("query", "Substring to match; empty clears the filter.")],
+  },
+  {
+    description: "Open a layer's inline style panel and select it.",
+    id: AGENT_ACTIONS.layerStyleOpen,
+    params: [NUM("layerId", "Layer id to select.", false)],
+  },
+  {
+    description: "Show or hide the account menu in the top bar.",
+    id: AGENT_ACTIONS.accountMenuSetVisible,
+    params: [BOOL("visible", "True to show the menu.")],
+  },
+  {
+    description:
+      "Toggle the account menu, opening the sign-in dialog when signed out.",
+    id: AGENT_ACTIONS.accountMenuToggle,
+    params: [],
+  },
+  {
+    description: "Switch the sign-in dialog between account/password and email code.",
+    id: AGENT_ACTIONS.authModeSet,
+    params: [STR("mode", "'account' or 'email-code'.")],
+  },
+  {
+    description: "Select a workspace module from the toolbar.",
+    id: AGENT_ACTIONS.moduleSelect,
+    params: [STR("module", "One of the module labels shown in the toolbar.")],
+  },
+  {
+    description: "Rename the project draft.",
+    id: AGENT_ACTIONS.projectSetName,
+    params: [STR("name", "New project name.")],
+  },
+  {
+    description: "Select the local benchmark point dataset, optionally loading it.",
+    id: AGENT_ACTIONS.pointsSelectDataset,
+    params: [
+      STR("datasetId", "Dataset id from the point-data manifest."),
+      BOOL("load", "True to start loading immediately."),
+    ],
+  },
+  {
+    description: "Set the point size in pixels.",
+    id: AGENT_ACTIONS.pointsSetSize,
+    params: [NUM("pointSize", "Point size in pixels.")],
+  },
+  {
+    description:
+      "Set the point layer style expression (colorMode, sizeMode, pointSize, shape, singleColor, filter).",
+    id: AGENT_ACTIONS.pointsSetStyle,
+    params: [OBJ("style", "Partial point style expression.")],
+  },
+  {
+    description: "Select the single raster layer source by id.",
+    id: AGENT_ACTIONS.rasterSelect,
+    params: [STR("rasterId", "Raster id from the single-raster manifest.")],
+  },
+  {
+    description: "Go back one step in the upload wizard.",
+    id: AGENT_ACTIONS.uploadBack,
+    params: [STR("step", "'select', 'map' or 'run'.", false)],
+  },
+  {
+    description: "The main menu (☰) is not implemented; the button is a placeholder.",
+    id: AGENT_ACTIONS.uiMenuToggle,
+    params: [],
+  },
+  {
+    description: "Settings (⚙) is not implemented; the button is a placeholder.",
+    id: AGENT_ACTIONS.uiSettingsOpen,
+    params: [],
+  },
+  {
+    description: "Information (ⓘ) is not implemented; the button is a placeholder.",
+    id: AGENT_ACTIONS.uiInfoOpen,
+    params: [],
+  },
+  {
+    description: "Notifications (♟) is not implemented; the button is a placeholder.",
+    id: AGENT_ACTIONS.uiNotificationsOpen,
+    params: [],
+  },
+  {
+    description:
+      "Place search is not implemented; the input is a placeholder with no globe lookup behind it.",
+    id: AGENT_ACTIONS.placeSearch,
+    params: [STR("query", "Place name to look up.")],
+  },
+  {
+    description:
+      "Major cities is not implemented; the checkbox is a placeholder with no dataset behind it.",
+    id: AGENT_ACTIONS.majorCitiesSetVisible,
+    params: [BOOL("visible", "True to show major cities.")],
+  },
+  { description: "Open the sign-in dialog.", id: AGENT_ACTIONS.authDialogOpen, params: [] },
+  { description: "Close the sign-in dialog.", id: AGENT_ACTIONS.authDialogClose, params: [] },
+  { description: "Collapse or expand the module toolbar.", id: AGENT_ACTIONS.toolbarToggle, params: [] },
+  {
+    description: "Publishing is not implemented; the button is a placeholder.",
+    id: AGENT_ACTIONS.publishPlaceholder,
+    params: [],
+  },
+  {
+    description: "Export is not implemented; the button is a placeholder.",
+    id: AGENT_ACTIONS.exportPlaceholder,
+    params: [],
+  },
+];
+
+/**
+ * Controls that exist in the UI but have no implementation behind them. They are
+ * declared as unsupported from the start, so `listActions()` and `execute()`
+ * both say so instead of advertising a feature that does not exist.
+ */
+const PLACEHOLDER_ACTION_IDS: readonly AgentActionId[] = [
+  AGENT_ACTIONS.exportPlaceholder,
+  AGENT_ACTIONS.majorCitiesSetVisible,
+  AGENT_ACTIONS.placeSearch,
+  AGENT_ACTIONS.publishPlaceholder,
+  AGENT_ACTIONS.uiInfoOpen,
+  AGENT_ACTIONS.uiMenuToggle,
+  AGENT_ACTIONS.uiNotificationsOpen,
+  AGENT_ACTIONS.uiSettingsOpen,
+];
+
+/** Lookup by id, so a UI handler can be attached without repeating the shape. */
+export const AGENT_DECLARATIONS: Readonly<
+  Record<AgentActionId, AgentActionDefinition>
+> = Object.fromEntries(
+  DECLARATIONS.map((declaration) => [
+    declaration.id,
+    {
+      description: declaration.description,
+      id: declaration.id,
+      params: declaration.params,
+      status: PLACEHOLDER_ACTION_IDS.includes(declaration.id)
+        ? "unsupported"
+        : "ready",
+      title: AGENT_ACTION_TITLES[declaration.id],
+    },
+  ]),
+) as Readonly<Record<AgentActionId, AgentActionDefinition>>;
+
+for (const definition of Object.values(AGENT_DECLARATIONS)) {
+  agentActions.register(definition);
+}
+
+/**
+ * Re-declares an action as unsupported and drops any handler attached to it,
+ * so `listActions()` stays an honest description of what this build can do
+ * (for example on a Server that only speaks V1).
+ */
+export function declareUnsupported(
+  id: AgentActionId,
+  reason: string,
+): void {
+  agentActions.register({
+    ...AGENT_DECLARATIONS[id],
+    description: reason,
+    status: "unsupported",
+  });
+}

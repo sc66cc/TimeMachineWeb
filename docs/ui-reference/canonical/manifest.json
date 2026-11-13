@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "status": "canonical",
+  "authority": "single-source-of-truth",
+  "product": "TimeMachineWeb",
+  "archivedAt": "2026-07-27",
+  "entry": "index.html",
+  "implementation": "standalone-html-css-javascript",
+  "logicalViewport": {
+    "width": 1919,
+    "height": 871
+  },
+  "typography": {
+    "fontFamily": "Arial, Helvetica, sans-serif"
+  },
+  "theme": {
+    "primaryColor": "rgb(42, 130, 228)"
+  },
+  "assetPolicy": {
+    "pageScreenshotAsUi": false,
+    "referenceImageUsage": "globe imagery only"
+  },
+  "files": [
+    {
+      "path": "index.html",
+      "sha256": "47a75816aec0e63d8d02e793a99fb53a07f74ed48453b274ba7beeb30023c228"
+    },
+    {
+      "path": "timemachine-reference-1to1.png",
+      "sha256": "01c540087fa76e946dc9d01550f77de6158885ddabe02a9940aad8a07bf9a00c"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+listen_addresses: 127.0.0.1:3002
+route_prefix: /atlas-tiles
+
+mbtiles:
+  paths: data/generated/paleoatlas-mvp

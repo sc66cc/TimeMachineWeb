@@ -1,0 +1,35 @@
+# Dependencies & Build Outputs
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+
+# OS & Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & Local Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Local Agent State & Worktrees
+.pi/
+.vibe-kanban/
+.worktrees/
+
+# Nested Standalone Git Repositories (managed independently)
+DPlanet/
+GPlates/
+prototypes/
+
+# Large Binary & Generated Datasets (keep lightweight PlateModelData & Colorbar)
+data/generated/
+data/TimeSequenceAtlas/
+data/SingleRaster/
+data/PointData/

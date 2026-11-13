@@ -1,0 +1,15 @@
+{
+  "name": "@timemachine/cesium-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@timemachine/reconstruction-core": "0.1.0"
+  },
+  "peerDependencies": {
+    "cesium": "^1.143.0"
+  }
+}

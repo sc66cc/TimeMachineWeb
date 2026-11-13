@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "paths": {
+      "@timemachine/api-client": [
+        "./packages/api-client/src/index.ts"
+      ],
+      "@timemachine/generated-api": [
+        "./packages/generated-api/src/index.ts"
+      ],
+      "@timemachine/platform-runtime": [
+        "./packages/platform-runtime/src/index.ts"
+      ],
+      "@timemachine/reconstruction-core": [
+        "./packages/reconstruction-core/src/index.ts"
+      ],
+      "@timemachine/cesium-runtime": [
+        "./packages/cesium-runtime/src/index.ts"
+      ],
+      "@timemachine/point-runtime": [
+        "./packages/point-runtime/src/index.ts"
+      ],
+      "@timemachine/raster-runtime": [
+        "./packages/raster-runtime/src/index.ts"
+      ]
+    },
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "types": ["vite/client"]
+  },
+  "include": ["src", "packages", "vite.config.ts"]
+}

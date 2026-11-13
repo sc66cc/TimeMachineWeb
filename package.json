@@ -1,0 +1,38 @@
+{
+  "name": "timemachine-web",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "data:atlas": "python3 scripts/prepare_paleoatlas_mvp.py --all-frames",
+    "data:atlas:mvp": "python3 scripts/prepare_paleoatlas_mvp.py",
+    "data:rasters": "python3 scripts/prepare_single_rasters.py",
+    "data:points": "python3 scripts/prepare_point_fixtures.py",
+    "serve:atlas": "martin --config deploy/martin/paleoatlas.yaml",
+    "serve:atlas:mvp": "martin --config deploy/martin/paleoatlas-mvp.yaml",
+    "test": "vitest run",
+    "test:atlas": "python3.12 scripts/browser_atlas_smoke.py",
+    "test:atlas:mvp": "python3.12 scripts/browser_atlas_smoke.py",
+    "test:rasters": "python3.12 scripts/browser_single_raster_smoke.py",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "cesium": "^1.143.0",
+    "vite-plugin-cesium": "^1.2.23",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "jsdom": "^29.1.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
+  }
+}
