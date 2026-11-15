@@ -16,7 +16,16 @@ import {
   UserPlateModelInvoker,
   ViFKey,
 } from "@timemachine/generated-api";
-import { RPCInvoker, rpcPath } from "@timemachine/api-client";
+import {
+  RPCHttpError,
+  RPCInvoker,
+  RPCRequestError,
+  RPCUploadStream,
+  rpcPath,
+  type RPCRequestOptions,
+  type RPCTelemetryEvent,
+  type RPCTransportOutcome,
+} from "@timemachine/api-client";
 
 import {
   ByteStreamFormatError,
@@ -49,6 +58,13 @@ const MAX_PAGE_SIZE = 100;
 /** `PageIndex.Index` is written as a signed Int32, so it cannot exceed this. */
 const MAX_PAGE_INDEX = 0x7fffffff;
 
+let requestSequence = 0;
+const requestPrefix = `shared-rpc-${Math.random().toString(36).slice(2, 10)}`;
+
+/** Local controls only; ByteStream's success code remains fixed by its protocol. */
+export type SharedPlateRequestOptions = Pick<RPCRequestOptions,
+  "signal" | "timeoutMs" | "context" | "suppressTelemetry">;
+
 export interface SharedPlateClientOptions {
   baseUrl: string;
   fetch?: typeof globalThis.fetch;
@@ -56,6 +72,9 @@ export interface SharedPlateClientOptions {
   getLanguage?: () => number | string;
   getTimeZone?: () => string;
   getRequestToken?: (path: string) => string | null | undefined;
+  /** Defaults to 30 seconds, matching the application's ordinary RPC configuration. */
+  defaultTimeoutMs?: number;
+  onTelemetry?: (event: RPCTelemetryEvent) => unknown;
 }
 
 export interface SharedPlateDisplayQuery {
@@ -74,13 +93,28 @@ export class SharedPlateRpcError extends Error {
   readonly code: number;
   readonly path: string;
 
-  constructor(code: number, message: string, path: string) {
+  constructor(code: number, message: string, path: string, readonly requestId?: string) {
     super(
       message || `Shared plate model RPC ${path} failed with code ${code}.`,
     );
     this.name = "SharedPlateRpcError";
     this.code = code;
     this.path = path;
+  }
+}
+
+/** Preserves the existing format-error contract while identifying this request. */
+export class SharedPlateDecodeError extends ByteStreamFormatError {
+  readonly kind = "decode-error";
+
+  constructor(message: string, readonly requestId: string, readonly path: string) {
+    super(message);
+  }
+}
+
+function validateTimeout(timeoutMs: number): void {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 0x7fffffff) {
+    throw new TypeError("Shared plate request timeout must be positive and within the timer range.");
   }
 }
 
@@ -97,6 +131,7 @@ export class SharedPlateModelClient {
   private readonly options: SharedPlateClientOptions;
 
   constructor(options: SharedPlateClientOptions) {
+    validateTimeout(options.defaultTimeoutMs ?? 30_000);
     this.options = options;
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchImplementation =
@@ -106,46 +141,64 @@ export class SharedPlateModelClient {
   /** Public, paginated catalog. Works without an access token. */
   async display(
     query: SharedPlateDisplayQuery = {},
+    options: SharedPlateRequestOptions = {},
   ): Promise<PageRO<PlateModelSimpleRO>> {
     const path = rpcPath(UserPlateModelInvoker.URL, UserPlateModelInvoker.URL_Display);
-    const frame = await this.sendByteStream(path, encodeDisplayRequest(query));
-    const reader = openSuccessFrame(path, frame);
-    const page = new PageRO<PlateModelSimpleRO>();
-    readPageROInto(reader, `${path}.Data`, page);
-    reader.expectEnd(path);
-    return page;
+    return this.sendByteStream(path, encodeDisplayRequest(query), options, reader => {
+      const page = new PageRO<PlateModelSimpleRO>();
+      readPageROInto(reader, `${path}.Data`, page);
+      return page;
+    });
   }
 
   /** The signed-in user's own models; an empty `_stream` is sent. */
-  async displayMine(): Promise<PlateModelSimpleRO[]> {
+  async displayMine(options: SharedPlateRequestOptions = {}): Promise<PlateModelSimpleRO[]> {
     const path = rpcPath(
       UserPlateModelInvoker.URL,
       UserPlateModelInvoker.URL_DisplayMine,
     );
-    const frame = await this.sendByteStream(path, new ByteStreamWriter().toUint8Array());
-    const reader = openSuccessFrame(path, frame);
-    const list = readPlateModelSimpleList(reader, `${path}.Data`);
-    reader.expectEnd(path);
-    return list;
+    return this.sendByteStream(path, new ByteStreamWriter().toUint8Array(), options,
+      reader => readPlateModelSimpleList(reader, `${path}.Data`));
   }
 
-  async getDetail(id: number): Promise<PlateModelRO> {
+  async getDetail(id: number, options: SharedPlateRequestOptions = {}): Promise<PlateModelRO> {
     const path = rpcPath(
       UserPlateModelInvoker.URL,
       UserPlateModelInvoker.URL_GetDetail,
     );
-    const frame = await this.sendByteStream(path, encodeGetDetailRequest(id));
-    const reader = openSuccessFrame(path, frame);
-    const model = new PlateModelRO();
-    readPlateModelROInto(reader, `${path}.Data`, model);
-    reader.expectEnd(path);
-    return model;
+    return this.sendByteStream(path, encodeGetDetailRequest(id), options, reader => {
+      const model = new PlateModelRO();
+      readPlateModelROInto(reader, `${path}.Data`, model);
+      return model;
+    });
   }
 
-  private async sendByteStream(
+  private async sendByteStream<T>(
     path: string,
     payload: Uint8Array<ArrayBuffer>,
-  ): Promise<ArrayBuffer> {
+    options: SharedPlateRequestOptions,
+    decode: (reader: ByteStreamReader) => T,
+  ): Promise<T> {
+    // Reuse ordinary RPC's whitelist/copy rules, not its JSON/file wire encoder.
+    const local = new RPCUploadStream(options).Options;
+    const timeoutMs = local.timeoutMs ?? this.options.defaultTimeoutMs ?? 30_000;
+    validateTimeout(timeoutMs);
+    const requestId = `${requestPrefix}-${++requestSequence}`;
+    const started = performance.now();
+    // path is private and comes only from the three generated route constants.
+    const emit = (outcome: RPCTransportOutcome, extra: Partial<RPCTelemetryEvent> = {}): void => {
+      if (local.suppressTelemetry || !this.options.onTelemetry) return;
+      const event: RPCTelemetryEvent = {
+        ...local.context, requestId, path, method: "POST", elapsedMs: performance.now() - started,
+        outcome, transportOutcome: outcome, businessOutcome: "not-checked", ...extra,
+      };
+      try { void Promise.resolve(this.options.onTelemetry(event)).catch(() => {}); }
+      catch { /* Diagnostics cannot affect requests or recursively report themselves. */ }
+    };
+    if (local.signal?.aborted) {
+      emit("cancelled");
+      throw new RPCRequestError("cancelled", requestId, path);
+    }
     const form = new FormData();
     form.append(
       BYTE_STREAM_FIELD,
@@ -169,17 +222,88 @@ export class SharedPlateModelClient {
       headers.set("Authorization", accessToken);
     }
 
-    const response = await this.fetchImplementation(`${this.baseUrl}${path}`, {
-      body: form,
-      headers,
-      method: "POST",
-    });
-    if (!response.ok) {
-      throw new Error(
-        `Shared plate model RPC ${path} returned HTTP ${response.status}.`,
+    const controller = new AbortController();
+    let abortKind: "timeout" | "cancelled" | undefined;
+    let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let rejectAbort!: (error: RPCRequestError) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    void aborted.catch(() => {});
+    const abort = (kind: "timeout" | "cancelled"): void => {
+      if (abortKind) return;
+      abortKind = kind;
+      // Own the reader so even an injected fetch that ignores its signal releases the body.
+      void bodyReader?.cancel().catch(() => {});
+      controller.abort();
+      rejectAbort(new RPCRequestError(kind, requestId, path));
+    };
+    const onAbort = (): void => abort("cancelled");
+    local.signal?.addEventListener("abort", onAbort, { once: true });
+    if (local.signal?.aborted) onAbort();
+    const timer = setTimeout(() => abort("timeout"), timeoutMs);
+    let response: Response | undefined;
+    let decoding = false;
+    const perform = async (): Promise<T> => {
+      if (abortKind) throw new RPCRequestError(abortKind, requestId, path);
+      response = await this.fetchImplementation(`${this.baseUrl}${path}`, {
+        body: form, headers, method: "POST", signal: controller.signal,
+      });
+      if (abortKind || !response.ok) {
+        void response.body?.cancel().catch(() => {});
+        if (abortKind) throw new RPCRequestError(abortKind, requestId, path);
+        throw new RPCHttpError(response.status, path, { data: undefined, headers: {}, status: response.status }, requestId);
+      }
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      bodyReader = response.body?.getReader();
+      try {
+        if (bodyReader) for (;;) {
+          const { done, value } = await bodyReader.read();
+          if (abortKind) throw new RPCRequestError(abortKind, requestId, path);
+          if (done) break;
+          chunks.push(value);
+          size += value.byteLength;
+        }
+      } finally {
+        bodyReader?.releaseLock();
+        bodyReader = undefined;
+      }
+      const frame = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { frame.set(chunk, offset); offset += chunk.byteLength; }
+      decoding = true;
+      const reader = openSuccessFrame(path, frame.buffer, requestId);
+      const result = decode(reader);
+      reader.expectEnd(path);
+      return result;
+    };
+    try {
+      const result = await Promise.race([perform(), aborted]);
+      if (abortKind) throw new RPCRequestError(abortKind, requestId, path);
+      emit("success", { status: response!.status, rpcCode: RPC_SUCCESS_CODE, businessOutcome: "success", completion: "response-read" });
+      return result;
+    } catch (error) {
+      if (abortKind) {
+        emit(abortKind, { status: response?.status });
+        throw new RPCRequestError(abortKind, requestId, path);
+      }
+      if (error instanceof SharedPlateRpcError) {
+        emit("success", { status: response?.status, rpcCode: error.code, businessOutcome: "failure", completion: "response-read" });
+        throw error;
+      }
+      if (error instanceof RPCHttpError) {
+        emit("http-error", { status: error.status });
+        throw error;
+      }
+      const kind = decoding ? "decode-error" : "network-error";
+      emit(kind, { status: response?.status });
+      if (decoding) throw new SharedPlateDecodeError(
+        error instanceof ByteStreamFormatError ? error.message : "Shared plate model frame could not be decoded.", requestId, path,
       );
+      throw new RPCRequestError(kind, requestId, path);
+    } finally {
+      clearTimeout(timer);
+      local.signal?.removeEventListener("abort", onAbort);
     }
-    return response.arrayBuffer();
   }
 }
 
@@ -247,12 +371,12 @@ export function encodeDisplayRequest(
  * Reads `Code` and `Message` and leaves the reader on `Data`. A non-success
  * frame throws, because the server omits `Data` for those.
  */
-function openSuccessFrame(path: string, frame: ArrayBuffer): ByteStreamReader {
+function openSuccessFrame(path: string, frame: ArrayBuffer, requestId: string): ByteStreamReader {
   const reader = new ByteStreamReader(frame);
   const code = reader.readInt32(`${path}.Code`);
   const message = reader.readString(`${path}.Message`);
   if (code !== RPC_SUCCESS_CODE) {
-    throw new SharedPlateRpcError(code, message, path);
+    throw new SharedPlateRpcError(code, message, path, requestId);
   }
   if (reader.remaining === 0) {
     throw new ByteStreamFormatError(

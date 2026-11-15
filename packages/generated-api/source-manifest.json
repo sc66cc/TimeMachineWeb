@@ -1,0 +1,936 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "DPlanet",
+    "root": "TypeScript/src",
+    "gitHead": "c94980ec350f7f7b993b9bb7552167e3d8c81f51",
+    "gitBranch": "stage0",
+    "producer": "MetaMaker (code_ex source headers); generator version not embedded",
+    "definitionDirectory": "MetaMaker2/Define",
+    "capture": "Current working-tree bytes, including modified and untracked generated files; not a HEAD-only export",
+    "authorization": "Internal reuse for the user-authorized application migration; no independent redistribution license asserted"
+  },
+  "entryFiles": [
+    "code_ex/d_planet/enum/dataset_geometry_type.ts",
+    "code_ex/d_planet/enum/processing_job_status.ts",
+    "code_ex/d_planet/enum/processing_job_type.ts",
+    "code_ex/d_planet/enum/project_layer_type.ts",
+    "code_ex/d_planet/enum/project_revision_status.ts",
+    "code_ex/d_planet/enum/raster_tile_format.ts",
+    "code_ex/d_planet/enum/resource_version_status.ts",
+    "code_ex/d_planet/enum/time_machine_client_type.ts",
+    "code_ex/d_planet/enum/time_machine_feature.ts",
+    "code_ex/d_planet/module/time_machine_catalog_invoker.ts",
+    "code_ex/d_planet/module/time_machine_compatibility_invoker.ts",
+    "code_ex/d_planet/module/time_machine_ingest_invoker.ts",
+    "code_ex/d_planet/module/time_machine_platform_invoker.ts",
+    "code_ex/d_planet/module/time_machine_workspace_invoker.ts",
+    "code_ex/d_planet/module/user_plate_model_invoker.ts",
+    "code_ex/d_planet/struct/dataset_ingest_job_ro.ts",
+    "code_ex/d_planet/struct/dataset_ingest_request_vo.ts",
+    "code_ex/d_planet/struct/dataset_upload_request_vo.ts",
+    "code_ex/d_planet/struct/dataset_upload_ticket_ro.ts",
+    "code_ex/d_planet/struct/dataset_version_catalog_ro.ts",
+    "code_ex/d_planet/struct/dataset_version_ro.ts",
+    "code_ex/d_planet/struct/geo_line_to.ts",
+    "code_ex/d_planet/struct/geo_polygon_to.ts",
+    "code_ex/d_planet/struct/plate_geo_to.ts",
+    "code_ex/d_planet/struct/plate_model_ingest_option_ro.ts",
+    "code_ex/d_planet/struct/plate_model_ro.ts",
+    "code_ex/d_planet/struct/plate_model_simple_ro.ts",
+    "code_ex/d_planet/struct/plate_model_to.ts",
+    "code_ex/d_planet/struct/plate_model_v1_conversion_ro.ts",
+    "code_ex/d_planet/struct/plate_model_version_catalog_ro.ts",
+    "code_ex/d_planet/struct/plate_model_version_ro.ts",
+    "code_ex/d_planet/struct/plate_rotation_to.ts",
+    "code_ex/d_planet/struct/point_csv_column_mapping_vo.ts",
+    "code_ex/d_planet/struct/processing_job_ro.ts",
+    "code_ex/d_planet/struct/project_document_v2_to.ts",
+    "code_ex/d_planet/struct/project_layer_to.ts",
+    "code_ex/d_planet/struct/project_revision_ro.ts",
+    "code_ex/d_planet/struct/project_revision_save_ro.ts",
+    "code_ex/d_planet/struct/project_revision_summary_ro.ts",
+    "code_ex/d_planet/struct/project_v1_conversion_ro.ts",
+    "code_ex/d_planet/struct/raster_tile_set_ro.ts",
+    "code_ex/d_planet/struct/time_machine_capabilities_ro.ts",
+    "code_ex/d_planet/struct/time_machine_feature_flag_to.ts",
+    "code_ex/d_planet/struct/time_machine_telemetry_vo.ts",
+    "code_ex/geometry/struct/geo_3_d_mesh_to.ts",
+    "code_ex/geometry/struct/geo_3_d_point_to.ts",
+    "code_ex/geometry/struct/geo_sphere_point_to.ts",
+    "code_ex/system/enum/resource_access_range.ts",
+    "code_ex/system/module/system_open_api_invoker.ts",
+    "code_ex/system/struct/file_link_to.ts",
+    "code_ex/system/struct/oss_file_access_to.ts",
+    "code_ex/system/struct/page_ro.ts",
+    "code_ex/system/struct/range_age_to.ts",
+    "code_ex/system/struct/string_string_to.ts",
+    "code_ex/user/module/account_invoker.ts",
+    "code_ex/user/module/login_invoker.ts",
+    "code_ex/user/module/login_mail_invoker.ts",
+    "code_ex/user/module/logout_invoker.ts",
+    "code_ex/user/struct/account_ro.ts",
+    "vi/enum32.ts",
+    "vi/fkey.ts"
+  ],
+  "allowedExternalImports": [
+    "@timemachine/api-client"
+  ],
+  "sourceClosureSha256": "616ad43a470fee34f008302db2c47c18a27f3be26b5a2da69def42f2443e6c34",
+  "accountDigestAdapter": {
+    "sourcePath": "TypeScript/src/utils/encrypt.ts",
+    "sourceSha256": "938d3ab6c20a426471a60bf4ac8bb3db25b1af651562474150d4f9b814fe7850",
+    "implementation": "src/account-password.ts (handwritten adapter, not generated DTO)",
+    "semantics": "SHA-256 of UTF-8(account + password + public protocol suffix), lowercase hex; malformed UTF-16 rejected",
+    "fallbackDependency": "crypto-js/sha256 4.2.0 (MIT), matching the source application's installed version; no MD5 imported"
+  },
+  "files": [
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/blending_mode.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/blending_mode.ts",
+      "bytes": 2367,
+      "sha256": "3a121f3c244f5d3b6d470ffdcc897734beca5259d7d0348548167439d931a1dc",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/dataset_geometry_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/dataset_geometry_type.ts",
+      "bytes": 1203,
+      "sha256": "ab1b2d3ca14f35e964d3687ba6d28d36bed2713c32e57d3655c6b944b20ffac7",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/filling_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/filling_type.ts",
+      "bytes": 842,
+      "sha256": "5efef468f3b3eb6a7513fd484549183725bb47208db5712107c23c5d13d8d953",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/license.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/license.ts",
+      "bytes": 2665,
+      "sha256": "6ff891d570d8e5e608bfe3691d1d4e233c9df57d4194c70401576a0a406c7319",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/outline_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/outline_type.ts",
+      "bytes": 838,
+      "sha256": "80be8597eb9e5303bbcc6fec4a612635516b2453111c2547fc41693290b794e6",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/planet_camera_sync_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/planet_camera_sync_type.ts",
+      "bytes": 1083,
+      "sha256": "4e0e7a8db0cdaec2427f01430185b398ed46ea551957a6db06f2a17eb2069900",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/plate_geo_field.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/plate_geo_field.ts",
+      "bytes": 1621,
+      "sha256": "76d4c9147f6d8d17ee4eed64e88d1212adda60c257628250e6665e419c3deecb",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/processing_job_status.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/processing_job_status.ts",
+      "bytes": 1265,
+      "sha256": "ebd7dee5629940251dc552c2029975c7de8b3fe6550ac396917f7041ecc76fdd",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/processing_job_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/processing_job_type.ts",
+      "bytes": 1655,
+      "sha256": "4d798108dc28fa90c75d9cbfe7c3c2b71d24a09f1314f88c5e2f21d01a3edeff",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/project_coordinate_reference_system.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/project_coordinate_reference_system.ts",
+      "bytes": 907,
+      "sha256": "3ec0812dd56eef9018bb23d123a002577123174c830e6b3c86db9853bd637a50",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/project_layer_symbol_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/project_layer_symbol_type.ts",
+      "bytes": 1034,
+      "sha256": "b4036dd4691949c07e90ffbc20ce659e648f48b77ffc7ba44cd94b96622cc8e1",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/project_layer_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/project_layer_type.ts",
+      "bytes": 1358,
+      "sha256": "f1eb8aa6710ec5dbcaf56debd7a07ccd06c57df0448cc4d1c9f2ff71c197cb0d",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/project_revision_status.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/project_revision_status.ts",
+      "bytes": 971,
+      "sha256": "3917ef7945f1e226bc6eba3b12840ee7a54c964d96561aa4fb27e85ad5f25831",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/project_sync_target.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/project_sync_target.ts",
+      "bytes": 802,
+      "sha256": "613728ba17b1bd9225f4eb9c5fb4c77b4312afc41ff8a5322ee9af6948437125",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/project_workspace_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/project_workspace_type.ts",
+      "bytes": 1074,
+      "sha256": "a318cf3a7b630eb3cc7e0fd925cc39ddce78c07aacd69f6a282cdb0cf9828a1f",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/raster_band_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/raster_band_type.ts",
+      "bytes": 1347,
+      "sha256": "c2cefd3a89ee4f1cf4ee9dd49560652f564f37386150dec9b88a14ce3b00ac12",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/raster_tile_format.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/raster_tile_format.ts",
+      "bytes": 901,
+      "sha256": "6fb013ff1e502654e856776e993db1a18c7042e4fe6f15101961f86e2d8cc04b",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/render_channel.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/render_channel.ts",
+      "bytes": 1112,
+      "sha256": "2e72573e32f4e10b44853526e7db9e0651cd8c3e870211fb6fa810f116695a28",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/resource_version_status.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/resource_version_status.ts",
+      "bytes": 1248,
+      "sha256": "dcf990483e1b7b6857bb3920c34fee3f7ea3e58e6f5ca4a4a79afc1ec10a9133",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/time_machine_client_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/time_machine_client_type.ts",
+      "bytes": 805,
+      "sha256": "cb05457d5234a68cb4c8b8e84e2ae9fed15dde93267df2bf913b8beddb6d9436",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/enum/time_machine_feature.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/enum/time_machine_feature.ts",
+      "bytes": 1531,
+      "sha256": "03da280f9468fc194b698c64268559141428a45ccb38a7a271c0faaba547928a",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/module/time_machine_catalog_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/module/time_machine_catalog_invoker.ts",
+      "bytes": 2022,
+      "sha256": "8977809b90221cd4a0524978a172319b71feb8c89c03e334ca597db645107371",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/module/time_machine_compatibility_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/module/time_machine_compatibility_invoker.ts",
+      "bytes": 2122,
+      "sha256": "e9592eba9a23d82c97f867be2b38f72526e6db82f2625d54832e88adb5476689",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/module/time_machine_ingest_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/module/time_machine_ingest_invoker.ts",
+      "bytes": 6655,
+      "sha256": "8be86685c1ad7b87658d091870b0b24a283ebd64fcc38f00eed82d5238cfb9e4",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/module/time_machine_platform_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/module/time_machine_platform_invoker.ts",
+      "bytes": 2218,
+      "sha256": "4640284ad8cf0f9bc49a7bf222ab956999a09c70febdb308268571dceb2ae2df",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/module/time_machine_workspace_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/module/time_machine_workspace_invoker.ts",
+      "bytes": 4874,
+      "sha256": "f382f2237b534a5e6dd53fb2b3bd6da9fe409b019eaabbc54f966707fa499794",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/module/user_plate_model_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/module/user_plate_model_invoker.ts",
+      "bytes": 5828,
+      "sha256": "84925465bc2c1c3c14d54b1dabec0994a7b8e229ed3e0e357c486eb754e7df23",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/atlas_mapping_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/atlas_mapping_to.ts",
+      "bytes": 830,
+      "sha256": "1a15ce145ec880c723cfecda0701be0caff8bde00d87b8ef7217457bb05d0c3c",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/dataset_ingest_job_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/dataset_ingest_job_ro.ts",
+      "bytes": 491,
+      "sha256": "32154fefc59757d7021c2661ea7fe7fe2ce3ea3ecdf0d3d6b58189d3939ba8f0",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/dataset_ingest_request_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/dataset_ingest_request_vo.ts",
+      "bytes": 1198,
+      "sha256": "7accc392bcefdaac287e0279416ced1b236b20cdd78a729f7d8fb2a18f7bc16d",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/dataset_upload_request_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/dataset_upload_request_vo.ts",
+      "bytes": 519,
+      "sha256": "89a5b0f049ffd8bf396c6e9930dfd1f1225223dcd9ba7d557d6126abc598c26d",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/dataset_upload_ticket_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/dataset_upload_ticket_ro.ts",
+      "bytes": 680,
+      "sha256": "841d5e88c08e8497c63cb9d2a6df20c1e238c6a6c2624598d3534d3504f39c4a",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/dataset_version_catalog_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/dataset_version_catalog_ro.ts",
+      "bytes": 416,
+      "sha256": "27f2b007d7304e91047fefd689d7853f9c16431085cb211d9cad690a05677298",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/dataset_version_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/dataset_version_ro.ts",
+      "bytes": 1684,
+      "sha256": "971c1ce645fb55ca2d524ad6f422484786772a16e0183ee405ce4d73a0a59c65",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_2_d_line_feature_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_2_d_line_feature_to.ts",
+      "bytes": 452,
+      "sha256": "8365b76526c86412a9c3a58b7f1ee3aab5097dbabb17666c9414b3ac10150a12",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_2_d_point_feature_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_2_d_point_feature_to.ts",
+      "bytes": 459,
+      "sha256": "a427f6928ff629c3480fe915fab00eb1e60a299f78f5a98ec792a632fb5a4972",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_2_d_polygon_feature_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_2_d_polygon_feature_to.ts",
+      "bytes": 473,
+      "sha256": "e48c2207146fb66b0e6d4e0950975fb830c6127ca3abb2af1c8cccc7122623de",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_line_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_line_to.ts",
+      "bytes": 295,
+      "sha256": "3cbfb3cdba87f7cd22380796cacbfdefd970abb0f8128946cd2c69976877103e",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_polygon_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_polygon_to.ts",
+      "bytes": 422,
+      "sha256": "dbf9928a0cc42f211a30e743595590aa555afe4fd4360e571b4dec366db9d3ff",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_reference_control_point_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_reference_control_point_to.ts",
+      "bytes": 525,
+      "sha256": "f5dff40a47ac1e083572ccd174f5f42d342ed21058ea4aff845bbca360ddb8d3",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/geo_reference_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/geo_reference_to.ts",
+      "bytes": 732,
+      "sha256": "2463ebd89bed15e67446bbd1ab3247b3ddb072751d14c430f24fa6f274eadad9",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/layer_categorization_info_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/layer_categorization_info_to.ts",
+      "bytes": 581,
+      "sha256": "9dff9bdd35bb01f888650f2fccc9c36ddcc58516a6ea456b8eda630b0d0cbac4",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/layer_categorization_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/layer_categorization_to.ts",
+      "bytes": 703,
+      "sha256": "42c76e0ce02d3f27222c3d66e428ca06d833f21eeecda4d0e14260fb4c5ef554",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_geo_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_geo_to.ts",
+      "bytes": 1099,
+      "sha256": "5e4c1c478cacbfea6fe9139c0e59583d1210a67997115af8f9c360c912a9b3f5",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_create_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_create_vo.ts",
+      "bytes": 687,
+      "sha256": "036da8de1460bf7f71b56fa6d2ba94d206cc2ed2f2fffe4bf2a7ef56de895b0b",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_display_condition_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_display_condition_vo.ts",
+      "bytes": 514,
+      "sha256": "7ffda770720dd05dc2e6440c40f78960a67dfda4cdc059116b326c8ad04fa423",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_ingest_option_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_ingest_option_ro.ts",
+      "bytes": 1083,
+      "sha256": "dcc9299171244e3c9d18b7e774689a189792cbfa9553fa01377a6acc5ef84dad",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_ro.ts",
+      "bytes": 1418,
+      "sha256": "ee50322e8d20409e01ea8d930882a6e9bd3b4b42edc3ad8580a8a147b0fb391c",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_simple_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_simple_ro.ts",
+      "bytes": 1108,
+      "sha256": "f088684073b2f3f802fc63484d367d6b75ef29ecb7495b894ee595ad84436e0d",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_to.ts",
+      "bytes": 564,
+      "sha256": "3e08ca4edeb3b91399b164856a4892ab76bcf1a8a0562291a2e70810680a0065",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_update_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_update_vo.ts",
+      "bytes": 687,
+      "sha256": "1a7c7ed97a3039bd9cd534c1417693d5ec85a87fb714b1e0bd9f1fa4f8a5992d",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_v1_conversion_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_v1_conversion_ro.ts",
+      "bytes": 508,
+      "sha256": "1d5873889de46385266f38b2dcaaacca564c1e6d7d776224a64278d1df39a2b5",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_version_catalog_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_version_catalog_ro.ts",
+      "bytes": 432,
+      "sha256": "5f9768b71212eff9d5c9917c45c261096bbdaa38564bdab1e4fd34dee1c163a7",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_model_version_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_model_version_ro.ts",
+      "bytes": 1412,
+      "sha256": "1202b8ecf9e3af9163f99002c2805892dc220d4833994350540f3e29159dc3db",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/plate_rotation_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/plate_rotation_to.ts",
+      "bytes": 401,
+      "sha256": "b4471ecd108032af9d9f1d56f6bab531494033f0e4a181ad7bff6d354d45f984",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/point_csv_column_mapping_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/point_csv_column_mapping_vo.ts",
+      "bytes": 849,
+      "sha256": "9cdbeb52e291d7db0f2a4f384a3b9f4c039032b34a6ee56157153e51ea5412d6",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/processing_job_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/processing_job_ro.ts",
+      "bytes": 2031,
+      "sha256": "54c0344aec88c5f0d34442eba95da55e930219b46c367cca8f1688146deee22e",
+      "sourceState": "modified"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_create_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_create_vo.ts",
+      "bytes": 1762,
+      "sha256": "daf611fbc33df81722cb1a608b85570ac671ccdd89f06bc6c5edc0f68e3a1b01",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_document_v2_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_document_v2_to.ts",
+      "bytes": 3109,
+      "sha256": "0e3e7c2db7e3ec437f1b86e96899160ae7ff78cfe905693f4ea0f3a6017e2917",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_globe_view_setting_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_globe_view_setting_to.ts",
+      "bytes": 1430,
+      "sha256": "9b2f5f0450d50b82ae47498902472fbc8ae2c3a772363acaaa4900ef3e625e4b",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_layer_path_node_property_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_layer_path_node_property_to.ts",
+      "bytes": 227,
+      "sha256": "45985f7b44f51272f80490d4a10aeedc8b6507a40f9939ff7e14a17daf315e40",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_layer_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_layer_to.ts",
+      "bytes": 3222,
+      "sha256": "285c49cc1b88d7e7f8786b198b460689ea9d0d4c63ef8e3f492d82c9735324e2",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_layer_view_setting_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_layer_view_setting_to.ts",
+      "bytes": 435,
+      "sha256": "c341838b942bb7d4585c5a5d52f85b4d3f5388fd0323dc81a0a451b03b6fa641",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_plate_model_style_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_plate_model_style_to.ts",
+      "bytes": 979,
+      "sha256": "029ab801b744d42caaa94e200d6f12915ddae4c2d5539b4f095f29e491cfcd6e",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_revision_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_revision_ro.ts",
+      "bytes": 1576,
+      "sha256": "986943aa38bdd0513c7f0e3e8791332cf5be9155c390ac6280257cbbbee23db7",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_revision_save_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_revision_save_ro.ts",
+      "bytes": 394,
+      "sha256": "4a4659a32bcf2ae050f2adc6d6ec0310120b60a35ba741255057e6fea09dfb90",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_revision_summary_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_revision_summary_ro.ts",
+      "bytes": 772,
+      "sha256": "4bb47d14e6dc56fa0a94819e642995e13ecd48b6a422b02afaa33b702e5656c7",
+      "sourceState": "untracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_ro.ts",
+      "bytes": 3472,
+      "sha256": "45e40118067890de5890557c5aff55fa4e512c1b601598dd4c8280e07b20e662",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_simple_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_simple_ro.ts",
+      "bytes": 2222,
+      "sha256": "33df8bf718ef35e196fe5365b511c5b3c31e9fcd28585c092c872fb6ee4c173a",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_update_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_update_vo.ts",
+      "bytes": 2484,
+      "sha256": "05dcd0ec44b18790548d1ae87c4ec4c740b8d5ad1fecbdbcb6b2f66fef750b56",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_v1_conversion_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_v1_conversion_ro.ts",
+      "bytes": 617,
+      "sha256": "ab1cdb2946429c9739e58a2f440d572e19cdb7f58b68dc89da2fb7064084bdf1",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/project_view_setting_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/project_view_setting_to.ts",
+      "bytes": 748,
+      "sha256": "ba0c78990149aeb720b56ee86c315273b6dbd913ce38fd0e4097e159f381bda4",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/raster_band_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/raster_band_to.ts",
+      "bytes": 867,
+      "sha256": "a75e404a9ef90c49cb771bb555f65dcaf33463da5b67292c16bff41b0a640be5",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/raster_feature_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/raster_feature_to.ts",
+      "bytes": 982,
+      "sha256": "f6d3c9b3d654f29f493957e8d8f4b82ccf7fac6a35915a88b74d8dfd9fd54ff4",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/raster_tile_set_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/raster_tile_set_ro.ts",
+      "bytes": 1960,
+      "sha256": "d703b3271f57991e39808f30556820814a65d9d42fad528c8206397a17323138",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/table_field_mapping_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/table_field_mapping_to.ts",
+      "bytes": 492,
+      "sha256": "931792148194fe23590d61193fcdb86c0d96d38355a0a2cf116e3aca42a78d1a",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/table_mapping_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/table_mapping_to.ts",
+      "bytes": 535,
+      "sha256": "36b9bc66d88257d612e58be0d982e3436e2b812cc663ecf97e6333c7ee0a511e",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/time_machine_capabilities_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/time_machine_capabilities_ro.ts",
+      "bytes": 841,
+      "sha256": "ce2e5d31d7d8f1681a5eabe0f316a7fc487f67928906f3ed00dbdcdd54b229e6",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/time_machine_feature_flag_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/time_machine_feature_flag_to.ts",
+      "bytes": 653,
+      "sha256": "234c6e1120a2959f962874723d937bf9b927fc5d7e5a3e2a37a9df797d575e5c",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/d_planet/struct/time_machine_telemetry_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/d_planet/struct/time_machine_telemetry_vo.ts",
+      "bytes": 1005,
+      "sha256": "62d6d3236eaf8d05f3dda6f8c53f3b36ba282751961a943cd08ec802279fca75",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/geometry/struct/geo_3_d_mesh_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/geometry/struct/geo_3_d_mesh_to.ts",
+      "bytes": 365,
+      "sha256": "bdab3534b24cb5f72e6d21fb585013ec37baf295d7bdf6445cde68116b0037a9",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/geometry/struct/geo_3_d_point_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/geometry/struct/geo_3_d_point_to.ts",
+      "bytes": 188,
+      "sha256": "f65e67bade673b29b6332caf5af763644d597f09e2340b9431b4cca0a1054423",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/geometry/struct/geo_sphere_point_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/geometry/struct/geo_sphere_point_to.ts",
+      "bytes": 203,
+      "sha256": "13d08caaffe6233714fbc78ac7cbd9b34cb5193446926329d312bfcac3ed6c89",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/authorize_level.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/authorize_level.ts",
+      "bytes": 1073,
+      "sha256": "5fcfcfbcd0a9a9abff702454791306a5574f161eb284e0ea4f671824f0f854f6",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/db_data_state.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/db_data_state.ts",
+      "bytes": 946,
+      "sha256": "eba92a047bf8990482a5d9f85fdc558fe35c6b2051b4742c9f7d3d3c173c0040",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/field_value_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/field_value_type.ts",
+      "bytes": 2564,
+      "sha256": "9a982883b6f85debff8a56893d806c928a043e55e189fb11a389ceb020ff79e9",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/language.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/language.ts",
+      "bytes": 917,
+      "sha256": "8aec80be9b0d979c519eb370a751a925368fa0874335073c9414336f180f12d8",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/resource_access_range.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/resource_access_range.ts",
+      "bytes": 966,
+      "sha256": "16b53ae2150a2d5adac041a5e1481ae03043bc40cfe16d1ce6c5f6e6fd9b2da3",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/value_mapping_mode.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/value_mapping_mode.ts",
+      "bytes": 914,
+      "sha256": "b7f83984346a83b28344a66e937b8a5019ba361ce00aefcdf54f0a0f839e0952",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/enum/value_stretch_type.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/enum/value_stretch_type.ts",
+      "bytes": 843,
+      "sha256": "4e7a318a82bddefb7ddac87a59b0a3de1ad9897637a5952154e062bb1cd8aee7",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/module/system_open_api_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/module/system_open_api_invoker.ts",
+      "bytes": 6454,
+      "sha256": "061194572b1f28c868cbb57bcbce1392e58e0da24f0a79f0bd4f6fc7ddeebfc9",
+      "sourceState": "modified"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/base_entity_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/base_entity_ro.ts",
+      "bytes": 683,
+      "sha256": "06aad9cce364d69f4f6c247b91bc110e3814a44b9cae428b044282ba7ac199f4",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/color_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/color_to.ts",
+      "bytes": 197,
+      "sha256": "dc57e5b645877f5ffdbb24b031e26230949f502bebe34a85a6b30e345e935ac2",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/field_and_value_float_32_matrix_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/field_and_value_float_32_matrix_to.ts",
+      "bytes": 527,
+      "sha256": "4c72a437629a621719c44dbc664c4bb3ee5f3272c8c549a9f421ee8cd5110748",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/field_and_value_string_matrix_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/field_and_value_string_matrix_to.ts",
+      "bytes": 525,
+      "sha256": "1de9c19e2fad6c7d6c0dcebb0b6a43ead74bada044ac9d77ee2330aa3fd03d9a",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/field_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/field_to.ts",
+      "bytes": 654,
+      "sha256": "c89dead2a3eb30cae56b752c15e64baf1d41bb3e5fe8e9038d4cac5fe3eb9d7e",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/file_link_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/file_link_to.ts",
+      "bytes": 462,
+      "sha256": "d81c743755ca18f6e88110c560a9ad9e6c92227cca567136633f284a1fde0acd",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/oss_file_access_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/oss_file_access_to.ts",
+      "bytes": 527,
+      "sha256": "60c414b0b97e02ea591b5915d3995a7d18a80a4db20f71faa4c5bdce77bc2b61",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/page_index.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/page_index.ts",
+      "bytes": 252,
+      "sha256": "e9cde3853aab73ea2f1e7e43a0ab6fb48399e70d1e0c5cb8566ec35a036ca608",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/page_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/page_ro.ts",
+      "bytes": 221,
+      "sha256": "59645c2c2b34aa59aa4daaa36e89ad13ce0a44582ade604d173652e85c253bcc",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/path_tree_node_to_ex.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/path_tree_node_to_ex.ts",
+      "bytes": 343,
+      "sha256": "4ea9d8a579fa003e500242d4cce6b879232437578dfe6f61d55f79cec2d591b5",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/path_tree_to_ex.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/path_tree_to_ex.ts",
+      "bytes": 332,
+      "sha256": "896a9a04c3907b31383695f2f1dd878ac28689bb0c877e870a5a20aea0b7739c",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/range_age_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/range_age_to.ts",
+      "bytes": 186,
+      "sha256": "bff2959286c7ae3ef633b2d4ecf29c0623d74339983de4460967a4c4be69bb3e",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/resource_access_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/resource_access_to.ts",
+      "bytes": 333,
+      "sha256": "6392e436425c206bf2de82a1efc3d8924ead8333bc75388200b7f7413a003741",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/string_string_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/string_string_to.ts",
+      "bytes": 232,
+      "sha256": "42bd9689f071038156cabe73972236c3bf40fc96a5e7bf2ae36c1fd8623d0d40",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/system/struct/value_mapping_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/system/struct/value_mapping_to.ts",
+      "bytes": 696,
+      "sha256": "f9e001cad69e6b93aa8e9fee662a0f31a0e6a2c30248ad94ee594154d59b76bf",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/module/account_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/module/account_invoker.ts",
+      "bytes": 3655,
+      "sha256": "b10d4c69e220e9a1e8c910d4bcc97ae5bf013aad3abed137274b4503fe6df004",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/module/login_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/module/login_invoker.ts",
+      "bytes": 3836,
+      "sha256": "82864aafd9cff0d5ec8db7e8db65ecb207f2823c0c4347d6abd3c1009c57b864",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/module/login_mail_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/module/login_mail_invoker.ts",
+      "bytes": 4703,
+      "sha256": "a3aaafb6ec8f345e99507491bd68067f82ae208f22d6b2b25de2608e6648f434",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/module/logout_invoker.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/module/logout_invoker.ts",
+      "bytes": 886,
+      "sha256": "abba7be81ff4267937781cdc099ec635b77ff8be2106add8e3bdbd61dc3590bf",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/struct/account_private_update_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/struct/account_private_update_vo.ts",
+      "bytes": 523,
+      "sha256": "bf73415265c91b20d6e91c3fcc31f8121b12428122613d1e2ec203a9ea45b40f",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/struct/account_register_vo.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/struct/account_register_vo.ts",
+      "bytes": 436,
+      "sha256": "ef18eeaf594f269048f79c93c1c16b9f932e8424eac41ba018387c7b3a7ec53f",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/struct/account_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/struct/account_ro.ts",
+      "bytes": 1213,
+      "sha256": "e92d7b9107b4ec0b7e0aa0debe4114c8574adce88d768465c52eb4f41a44d412",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/struct/login_external_bind_account_ro.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/struct/login_external_bind_account_ro.ts",
+      "bytes": 308,
+      "sha256": "2a816c59013265bc1f920d835ea9e6eb3fc8748133ba8351852b56041647e0ae",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/code_ex/user/struct/role_authorize_to.ts",
+      "sourcePath": "TypeScript/src/code_ex/user/struct/role_authorize_to.ts",
+      "bytes": 495,
+      "sha256": "0a34addf5cf933cc771a7bc3c121311d7a25d1a7a4610d904976f53e006926df",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/vi/enum32.ts",
+      "sourcePath": "TypeScript/src/vi/enum32.ts",
+      "bytes": 123,
+      "sha256": "f51172b695f8ca51981b9cc12d5df431bc5c1ab9cdb77354eda59508e2aa977d",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/vi/enum_element_info.ts",
+      "sourcePath": "TypeScript/src/vi/enum_element_info.ts",
+      "bytes": 1663,
+      "sha256": "9c75671050303a32c340a337184ce819d6f6860127a5b8d62849fbecbf7f8fd3",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/vi/fkey.ts",
+      "sourcePath": "TypeScript/src/vi/fkey.ts",
+      "bytes": 123,
+      "sha256": "e0a0a11992b606cd76b42213c4c418d0af37924059fc42c756e0f9e1541fc415",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/vi/mask.ts",
+      "sourcePath": "TypeScript/src/vi/mask.ts",
+      "bytes": 1777,
+      "sha256": "c8cff2a464db9e67dd3e29011fe4fa435b2db771e441b0a2ea5a6a0f38f46b9f",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/vi/mask32.ts",
+      "sourcePath": "TypeScript/src/vi/mask32.ts",
+      "bytes": 505,
+      "sha256": "4ad247135c38e0f517d5fbdd85087a27d77fcf06fe976337c6bbf9520cf10588",
+      "sourceState": "tracked"
+    },
+    {
+      "path": "src/snapshot/vi/mask64.ts",
+      "sourcePath": "TypeScript/src/vi/mask64.ts",
+      "bytes": 505,
+      "sha256": "6490d567767eb1701b4c4e865b6e74544d2867784776caf8d8d52364f1281528",
+      "sourceState": "tracked"
+    }
+  ]
+}

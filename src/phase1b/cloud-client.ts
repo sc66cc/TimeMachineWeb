@@ -1,5 +1,6 @@
 import {
   AccountInvoker,
+  GetPassword,
   LoginInvoker,
   LoginMailInvoker,
   LogoutInvoker,
@@ -18,7 +19,6 @@ import {
   type ProjectRevisionRO,
   type ProjectRevisionSummaryRO,
 } from "@timemachine/generated-api";
-import { GetPassword } from "../../DPlanet/TypeScript/src/utils/encrypt";
 
 import {
   bootstrapTimeMachinePlatform,
@@ -26,7 +26,17 @@ import {
   isTimeMachineServerConfigured,
   TIME_MACHINE_ACCESS_TOKEN_KEY,
 } from "../platform-bootstrap";
-import { RPCInvoker, type RPCClientOptions } from "@timemachine/api-client";
+import { RPCInvoker, RPCHttpError, RPCUploadStream, type RPCClientOptions, type RPCRequestOptions } from "@timemachine/api-client";
+import { withRpcDiagnostics } from "../diagnostics/rpc-options";
+import { AgentActionBusyError } from "../agent-actions/registry";
+import { OperationInterruptedError } from "../agent-actions/operation";
+import {
+  commitOpenedProject,
+  parseCloudProjectReference,
+  readProjectCloudContext,
+  updateProjectCloudContext,
+  type ProjectCloudContext,
+} from "../project/project-cloud-context";
 
 import { SharedPlateModelClient } from "../plate-model/shared-plate-client";
 import {
@@ -69,6 +79,14 @@ export interface CloudProjectReference {
   revisionNumber: number;
 }
 
+export class CloudProjectSaveError extends Error {
+  constructor(readonly reference: CloudProjectReference, readonly phase: "local-reference" | "workspace-refresh", cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(`Cloud revision ${reference.revisionNumber} was saved, but ${phase === "local-reference" ? "its local reference could not be saved; open the cloud project before saving again" : "the workspace could not be refreshed"}: ${reason}`);
+    this.name = "CloudProjectSaveError";
+  }
+}
+
 export interface ResourceSelection {
   datasetVersionId: number;
   /** Shared (V1) plate model ID from `UserPlateModel`. Not a versioned ID. */
@@ -90,6 +108,9 @@ export interface RuntimeDataUrlOverrides {
 
 export interface Phase1BState {
   account?: CloudAccount;
+  /** Safe UI state; reading the template does not access or mutate storage. */
+  cloudReference?: CloudProjectReference;
+  projectContextError?: string;
   datasets: readonly DatasetVersionCatalogRO[];
   message: string;
   plateModels: readonly PlateModelVersionCatalogRO[];
@@ -115,6 +136,14 @@ export interface Phase1BState {
 
 type Phase1BListener = (state: Phase1BState) => void;
 
+interface ProjectOperationOwner {
+  kind: "open" | "save";
+  contextId: string | undefined;
+  accountGeneration: number;
+  accountEmail: string | undefined;
+  reference: CloudProjectReference | undefined;
+}
+
 interface StorageLike {
   getItem(key: string): string | null;
   removeItem(key: string): void;
@@ -130,15 +159,20 @@ export interface Phase1BCloudClientOptions {
   storage?: StorageLike;
 }
 
+class CloudRpcError extends Error {
+  constructor(readonly code: number, message: string) {
+    super(message || `Server request failed (${code}).`);
+    this.name = "CloudRpcError";
+  }
+}
+
 function requireData<T>(result: {
   Code: number;
   Data?: T;
   Message: string;
 }): T {
   if (result.Code !== 200 || result.Data === undefined) {
-    throw new Error(
-      result.Message || `Server request failed (${result.Code}).`,
-    );
+    throw new CloudRpcError(result.Code, result.Message);
   }
   return result.Data;
 }
@@ -185,19 +219,6 @@ export function normalizeSelection(raw: unknown): ResourceSelection {
     plateModelVersionId: finiteNumber(value.plateModelVersionId),
     useLocalPlateModelDemo: value.useLocalPlateModelDemo === true,
   };
-}
-
-function readJSON<T>(storage: StorageLike, key: string): T | undefined {
-  const serialized = storage.getItem(key);
-  if (!serialized) {
-    return undefined;
-  }
-  try {
-    return JSON.parse(serialized) as T;
-  } catch {
-    storage.removeItem(key);
-    return undefined;
-  }
 }
 
 function toCloudAccount(account: AccountRO): CloudAccount {
@@ -267,6 +288,9 @@ export class Phase1BCloudClient {
   private readonly sharedPlateClient: SharedPlateModelClient;
   private readonly serverUrl: string;
   private initializePromise: Promise<Phase1BState> | undefined;
+  private accountGeneration = 0;
+  private projectOperation?: ProjectOperationOwner;
+  private unpersistedCloudSave?: { contextId: string | undefined; error: CloudProjectSaveError };
   private state: Phase1BState = {
     datasets: [],
     message: "",
@@ -296,11 +320,11 @@ export class Phase1BCloudClient {
     this.serverUrl = getTimeMachineServerUrl()?.trim() ?? "";
     this.sharedPlateClient =
       options.sharedPlateClient ??
-      new SharedPlateModelClient({
+      new SharedPlateModelClient(withRpcDiagnostics({
         baseUrl: this.serverUrl,
         fetch: options.fetch,
         getAccessToken: () => this.sessionStorage.getItem(TIME_MACHINE_ACCESS_TOKEN_KEY),
-      });
+      }));
   }
 
   get snapshot(): Phase1BState {
@@ -324,6 +348,7 @@ export class Phase1BCloudClient {
   }
 
   async login(email: string, code: string): Promise<Phase1BState> {
+    this.accountGeneration++;
     await this.ensureConfigured();
     requireSuccess(await LoginMailInvoker.Prepare(email.trim(), code.trim()));
     const account = requireData(
@@ -340,6 +365,7 @@ export class Phase1BCloudClient {
     account: string,
     password: string,
   ): Promise<Phase1BState> {
+    this.accountGeneration++;
     await this.ensureConfigured();
     const trimmedAccount = account.trim();
     const result = await LoginInvoker.Login(
@@ -355,34 +381,32 @@ export class Phase1BCloudClient {
   }
 
   async logout(): Promise<void> {
+    this.accountGeneration++;
     try {
       if (this.sessionStorage.getItem(TIME_MACHINE_ACCESS_TOKEN_KEY)) {
         requireSuccess(await LogoutInvoker.Logout());
       }
     } finally {
-      this.clearCloudReference();
-      this.clearSession();
-      this.setState({
-        account: undefined,
-        message: "",
-        projects: [],
-        status: "signed-out",
-      });
+      try { this.clearCloudReference(); }
+      finally {
+        this.clearSession();
+        this.setState({ account: undefined, message: "", projects: [], status: "signed-out" });
+      }
       await this.refreshSharedPlateModels();
     }
   }
 
-  async refreshCatalogs(): Promise<Phase1BState> {
-    await this.refreshSharedPlateModels();
+  async refreshCatalogs(options?: RPCRequestOptions): Promise<Phase1BState> {
+    await this.refreshSharedPlateModels(options);
     if (this.state.v2WorkspaceAvailable) {
       return this.state.account
-        ? this.refreshWorkspace()
-        : this.refreshPublicCatalogs();
+        ? this.refreshWorkspace(options)
+        : this.refreshPublicCatalogs(options);
     }
     return this.state;
   }
 
-  async refreshWorkspace(): Promise<Phase1BState> {
+  async refreshWorkspace(options?: RPCRequestOptions): Promise<Phase1BState> {
     if (!this.state.account) {
       return this.state;
     }
@@ -397,16 +421,16 @@ export class Phase1BCloudClient {
     this.setState({ message: "Refreshing cloud workspace…" });
     const [plateModels, datasets, projects, plateModelCatalog] =
       await Promise.all([
-        TimeMachineWorkspaceInvoker.DisplayPlateModelVersions().then(
+        TimeMachineWorkspaceInvoker.DisplayPlateModelVersions(new RPCUploadStream({ ...options, businessSuccessCode: 200 })).then(
           requireData,
         ),
-        TimeMachineWorkspaceInvoker.DisplayDatasetVersions(new ViFKey(0)).then(
+        TimeMachineWorkspaceInvoker.DisplayDatasetVersions(new ViFKey(0), new RPCUploadStream({ ...options, businessSuccessCode: 200 })).then(
           requireData,
         ),
-        TimeMachineWorkspaceInvoker.DisplayLatestProjectRevisions().then(
+        TimeMachineWorkspaceInvoker.DisplayLatestProjectRevisions(new RPCUploadStream({ ...options, businessSuccessCode: 200 })).then(
           requireData,
         ),
-        this.fetchPlateModelCatalog(),
+        this.fetchPlateModelCatalog(options),
       ]);
     this.setState({
       datasets,
@@ -423,7 +447,7 @@ export class Phase1BCloudClient {
    * Reads the shared (V1) plate model catalog. Public pages are walked to
    * `PageRO.Total`; when signed in, `DisplayMine` is merged and de-duplicated.
    */
-  async refreshSharedPlateModels(): Promise<Phase1BState> {
+  async refreshSharedPlateModels(options?: RPCRequestOptions): Promise<Phase1BState> {
     if (!this.serverUrl) {
       this.setState({
         sharedPlateModels: [],
@@ -451,7 +475,7 @@ export class Phase1BCloudClient {
           accessRangeMask: PUBLIC_ACCESS_RANGE_MASK,
           pageIndex: index,
           pageSize: SHARED_PLATE_PAGE_SIZE,
-        });
+        }, options);
         total = page.Total;
         for (const model of page.List) {
           const id = foreignKeyValue(model.ID);
@@ -471,7 +495,7 @@ export class Phase1BCloudClient {
         }
       }
       const mineModels = this.state.account
-        ? await this.sharedPlateClient.displayMine()
+        ? await this.sharedPlateClient.displayMine(options)
         : [];
       const merged: PlateModelSimpleRO[] = [...publicModels];
       const mineIds = new Set<number>();
@@ -564,113 +588,104 @@ export class Phase1BCloudClient {
     if (!this.state.account) {
       throw new Error("Sign in before saving a cloud project.");
     }
-    document.Version = "phase1b";
-    document.PlateModelVersion.Value = this.state.selection.plateModelVersionId;
-    let activeReference = this.getCloudReference();
-    if (
-      activeReference &&
-      activeReference.accountEmail !== this.state.account.email
-    ) {
-      this.clearCloudReference();
-      activeReference = undefined;
-    }
-    if (!activeReference) {
-      const revision = requireData(
-        await TimeMachineWorkspaceInvoker.CreateProject(document),
-      );
-      const reference = this.referenceFromRevision(revision);
-      this.persistCloudReference(reference);
-      await this.refreshWorkspace();
+    const owner = this.beginProjectOperation("save");
+    try {
+      if (owner.reference && owner.reference.accountEmail !== owner.accountEmail) {
+        throw new Error("This cloud project belongs to a different account. Open it with the current account before saving.");
+      }
+      const request = structuredClone(document);
+      const plateModelVersionId = this.state.selection.plateModelVersionId;
+      if (foreignKeyValue(request.PlateModelVersion) !== plateModelVersionId) {
+        Object.assign(request, { PlateModelVersion: typeof request.PlateModelVersion === "object" && request.PlateModelVersion !== null
+          ? { ...request.PlateModelVersion, Value: plateModelVersionId } : new ViFKey(plateModelVersionId) });
+      }
+      let revision: ProjectRevisionRO;
+      if (!owner.reference) {
+        revision = requireData(await TimeMachineWorkspaceInvoker.CreateProject(request));
+      } else {
+        const saved = requireData(await TimeMachineWorkspaceInvoker.SaveProject(
+          new ViFKey(owner.reference.projectId), new ViFKey(owner.reference.revisionId), request,
+        ));
+        if (saved.Conflict) {
+          throw new Error(`Cloud project changed in another browser (revision ${saved.CurrentRevision.RevisionNumber || "new"}). Open the latest revision before saving again.`);
+        }
+        revision = saved.Revision;
+      }
+      this.assertProjectOwner(owner);
+      const reference = this.referenceFromRevision(revision, owner.accountEmail ?? "");
+      try { this.persistCloudReference(reference, owner.contextId); }
+      catch (cause) {
+        const error = new CloudProjectSaveError(reference, "local-reference", cause);
+        this.unpersistedCloudSave = { contextId: owner.contextId, error };
+        this.reportProjectContextError(error);
+        throw error;
+      }
+      owner.reference = reference;
+      this.assertProjectOwner(owner);
+      try { await this.refreshWorkspace(); }
+      catch (cause) { throw new CloudProjectSaveError(reference, "workspace-refresh", cause); }
+      this.assertProjectOwner(owner);
       return reference;
+    } finally {
+      if (this.projectOperation === owner) this.projectOperation = undefined;
     }
-
-    const saved = requireData(
-      await TimeMachineWorkspaceInvoker.SaveProject(
-        new ViFKey(activeReference.projectId),
-        new ViFKey(activeReference.revisionId),
-        document,
-      ),
-    );
-    if (saved.Conflict) {
-      const currentRevision = saved.CurrentRevision;
-      const currentNumber = currentRevision.RevisionNumber || "new";
-      throw new Error(
-        `Cloud project changed in another browser (revision ${currentNumber}). Open the latest revision before saving again.`,
-      );
-    }
-    const reference = this.referenceFromRevision(saved.Revision);
-    this.persistCloudReference(reference);
-    await this.refreshWorkspace();
-    return reference;
   }
 
   async openProject(
     summary: ProjectRevisionSummaryRO,
-  ): Promise<ProjectDocumentV2TO> {
+    prepareDraft: (document: ProjectDocumentV2TO, original: string) => string,
+  ): Promise<{ contextId: string; reference: CloudProjectReference }> {
     if (!this.state.v2WorkspaceAvailable) {
       throw new Error(
         "This Server does not implement the TimeMachine V2 workspace endpoints, so cloud projects cannot be opened.",
       );
     }
-    const revision = requireData(
-      await TimeMachineWorkspaceInvoker.GetProjectRevision(
-        new ViFKey(foreignKeyValue(summary.Revision)),
-      ),
-    );
-    const document = JSON.parse(revision.DocumentJson) as ProjectDocumentV2TO;
-    const extensionRecord =
-      document.LegacyExtensions instanceof Map
-        ? Object.fromEntries(document.LegacyExtensions)
-        : (document.LegacyExtensions as unknown as Record<string, string>);
-    // The plate model the project actually used is the sourceRef of its plate
-    // model layer, not the versioned foreign key: a V1 project has no V2 row,
-    // and reading only the version would silently keep whatever was selected
-    // before the project was opened.
-    const layerType = (layer: {
-      Type?: number | { Value?: number };
-    }): number => foreignKeyValue(layer.Type);
-    const plateLayer = (document.LayerList ?? []).find(
-      (layer) => layerType(layer) === ProjectLayerType.PlateModel,
-    );
-    const pointLayer = (document.LayerList ?? []).find(
-      (layer) => layerType(layer) === ProjectLayerType.Point,
-    );
-    const plateSource = plateModelSourceFromRef(
-      plateLayer === undefined
-        ? undefined
-        : extensionRecord[`sourceRef:${plateLayer.ID}`],
-    );
-    const datasetSource =
-      pointLayer === undefined
-        ? undefined
-        : extensionRecord[`sourceRef:${pointLayer.ID}`];
-    const datasetVersionId = datasetSource?.startsWith("resource:dataset-version:")
-      ? Number(datasetSource.split(":").at(-1)) || 0
-      : 0;
-    // Exactly one source survives: opening a V2 project must not keep the V1
-    // selection, and a project with no source must not keep the global one.
-    this.persistSelection(
-      applyPlateModelSource(
-        {
-          ...this.state.selection,
-          datasetVersionId,
-        },
-        plateSource,
-      ),
-    );
-    this.persistCloudReference(this.referenceFromRevision(revision));
-    return document;
+    await this.initialize();
+    const owner = this.beginProjectOperation("open");
+    try {
+      const revision = requireData(await TimeMachineWorkspaceInvoker.GetProjectRevision(new ViFKey(foreignKeyValue(summary.Revision))));
+      this.assertProjectOwner(owner);
+      const document = JSON.parse(revision.DocumentJson) as ProjectDocumentV2TO;
+      const serializedDraft = prepareDraft(document, revision.DocumentJson);
+      this.assertProjectOwner(owner);
+      const extensions = document.LegacyExtensions instanceof Map
+        ? Object.fromEntries(document.LegacyExtensions) : document.LegacyExtensions as unknown as Record<string, string> | undefined;
+      const plateLayer = document.LayerList.find(layer => foreignKeyValue(layer.Type) === ProjectLayerType.PlateModel);
+      const pointLayer = document.LayerList.find(layer => foreignKeyValue(layer.Type) === ProjectLayerType.Point);
+      const plateSource = plateModelSourceFromRef(plateLayer ? extensions?.[`sourceRef:${plateLayer.ID}`] : undefined);
+      const datasetSource = pointLayer ? extensions?.[`sourceRef:${pointLayer.ID}`] : undefined;
+      const datasetVersionId = datasetSource?.startsWith("resource:dataset-version:") ? Number(datasetSource.split(":").at(-1)) : 0;
+      const selection = applyPlateModelSource({ datasetVersionId, plateModelId: 0, plateModelVersionId: 0, useLocalPlateModelDemo: false }, plateSource);
+      const reference = this.referenceFromRevision(revision, owner.accountEmail ?? "");
+      const context = { contextId: crypto.randomUUID(), selection, reference };
+      try { commitOpenedProject(this.storage, serializedDraft, context); }
+      catch (error) { this.reportProjectContextError(error); throw error; }
+      this.unpersistedCloudSave = undefined;
+      owner.contextId = context.contextId;
+      owner.reference = reference;
+      this.setState({ selection, cloudReference: reference, projectContextError: undefined });
+      this.assertProjectOwner(owner);
+      return { contextId: context.contextId, reference };
+    } finally {
+      if (this.projectOperation === owner) this.projectOperation = undefined;
+    }
   }
 
   getCloudReference(): CloudProjectReference | undefined {
-    return readJSON<CloudProjectReference>(
-      this.storage,
-      CLOUD_REFERENCE_KEY,
-    );
+    const context = this.readCloudContext();
+    return context ? context.reference : this.readLegacyCloudReference();
   }
 
   clearCloudReference(): void {
-    this.storage.removeItem(CLOUD_REFERENCE_KEY);
+    const context = this.readCloudContext();
+    try {
+      if (context) updateProjectCloudContext(this.storage, context.contextId, current => {
+        const { reference: _reference, ...rest } = current;
+        return rest;
+      });
+      else this.storage.removeItem(CLOUD_REFERENCE_KEY);
+    } catch (error) { this.reportProjectContextError(error); throw error; }
+    this.setState({ cloudReference: undefined, projectContextError: undefined });
   }
 
   /**
@@ -782,9 +797,10 @@ export class Phase1BCloudClient {
   }
 
   private async initializeInternal(): Promise<Phase1BState> {
-    const selection = normalizeSelection(
-      readJSON<ResourceSelection>(this.storage, RESOURCE_SELECTION_KEY),
-    );
+    const context = this.readCloudContext();
+    const selection = context ? context.selection : normalizeSelection(this.readLegacyProjectValue(RESOURCE_SELECTION_KEY));
+    const cloudReference = context ? context.reference : this.readLegacyCloudReference();
+    this.setState({ cloudReference, projectContextError: undefined });
     this.serverUrlState(selection);
     if (!this.serverUrl) {
       this.setState({
@@ -814,7 +830,7 @@ export class Phase1BCloudClient {
     this.ensureRpcConfigured();
     this.setState({
       message: bootstrapFailed
-        ? "This Server does not expose the TimeMachine V2 capability endpoint. Shared plate models and account sign-in still work; versioned catalogs and cloud projects are unavailable."
+        ? "TimeMachine V2 capabilities could not be confirmed. Shared plate models and account sign-in remain available; versioned catalogs and cloud projects are currently unavailable."
         : "",
       v2WorkspaceAvailable: !bootstrapFailed,
     });
@@ -835,15 +851,17 @@ export class Phase1BCloudClient {
       const account = requireData(await AccountInvoker.Display());
       restoredAccount = toCloudAccount(account);
     } catch (error) {
-      // A stale or rejected token: the token and the cached identity are
-      // cleared together, so a persisted account can never make an
-      // unauthenticated boot look signed in.
-      this.clearSession();
+      // Only an explicit authentication rejection invalidates credentials.
+      // Network/decode/server failures leave storage intact but never publish
+      // the cached identity as a verified signed-in account.
+      const code = error instanceof CloudRpcError ? error.code : error instanceof RPCHttpError ? error.status : undefined;
+      const rejected = code === 401 || code === 403;
+      if (rejected) this.clearSession();
       this.setState({
         account: undefined,
         message:
           error instanceof Error ? error.message : "Session restore failed.",
-        status: "signed-out",
+        status: rejected ? "signed-out" : "error",
       });
       return this.state;
     }
@@ -897,18 +915,19 @@ export class Phase1BCloudClient {
         );
       };
     }
-    RPCInvoker.Configure(options);
+    RPCInvoker.Configure(withRpcDiagnostics(options));
   }
 
-  private async refreshPublicCatalogs(): Promise<Phase1BState> {
+  private async refreshPublicCatalogs(options?: RPCRequestOptions): Promise<Phase1BState> {
     const [plateModels, datasets, plateModelCatalog] = await Promise.all([
-      TimeMachineCatalogInvoker.DisplayPublicPlateModelVersions().then(
+      TimeMachineCatalogInvoker.DisplayPublicPlateModelVersions(new RPCUploadStream({ ...options, businessSuccessCode: 200 })).then(
         requireData,
       ),
       TimeMachineCatalogInvoker.DisplayPublicDatasetVersions(
         new ViFKey(0),
+        new RPCUploadStream({ ...options, businessSuccessCode: 200 }),
       ).then(requireData),
-      this.fetchPlateModelCatalog(),
+      this.fetchPlateModelCatalog(options),
     ]);
     this.setState({
       datasets,
@@ -925,15 +944,17 @@ export class Phase1BCloudClient {
    * Reads the PlateModel catalog the ingest wizard binds to. A failure here must not break
    * the workspace refresh, because the rest of the catalog is still usable without upload.
    */
-  private async fetchPlateModelCatalog(): Promise<
+  private async fetchPlateModelCatalog(options?: RPCRequestOptions): Promise<
     readonly PlateModelIngestOptionRO[]
   > {
     try {
       return requireData(
-        await TimeMachineIngestInvoker.DisplayIngestPlateModels(),
+        await TimeMachineIngestInvoker.DisplayIngestPlateModels(new RPCUploadStream({ ...options, businessSuccessCode: 200 })),
       );
-    } catch (error) {
-      console.warn("Plate model catalog could not be read.", error);
+    } catch {
+      // Request diagnostics already carry the safe route, status and trace.
+      // Server-provided error messages can contain credentials or resource data.
+      console.warn("Plate model catalog could not be read.");
       return [];
     }
   }
@@ -947,14 +968,15 @@ export class Phase1BCloudClient {
 
   private referenceFromRevision(
     revision: ProjectRevisionRO,
+    accountEmail: string,
   ): CloudProjectReference {
-    return {
-      accountEmail: this.state.account?.email ?? "",
+    return parseCloudProjectReference({
+      accountEmail,
       contentHash: revision.ContentHash,
       projectId: foreignKeyValue(revision.Project),
       revisionId: foreignKeyValue(revision.ID),
       revisionNumber: revision.RevisionNumber,
-    };
+    });
   }
 
   private persistAccount(account: CloudAccount): void {
@@ -962,16 +984,77 @@ export class Phase1BCloudClient {
     this.setState({ account, message: "", status: "signed-in" });
   }
 
-  private persistCloudReference(reference: CloudProjectReference): void {
-    this.storage.setItem(CLOUD_REFERENCE_KEY, JSON.stringify(reference));
+  private persistCloudReference(reference: CloudProjectReference, expectedContextId: string | undefined): void {
+    const context = this.readCloudContext();
+    if (context?.contextId !== expectedContextId) throw new OperationInterruptedError("superseded");
+    try {
+      if (context) updateProjectCloudContext(this.storage, context.contextId, current => ({ ...current, reference }));
+      else this.storage.setItem(CLOUD_REFERENCE_KEY, JSON.stringify(reference));
+    } catch (error) { this.reportProjectContextError(error); throw error; }
+    this.setState({ cloudReference: reference, projectContextError: undefined });
   }
 
   private persistSelection(selection: ResourceSelection): void {
-    this.storage.setItem(RESOURCE_SELECTION_KEY, JSON.stringify(selection));
-    this.setState({ selection });
+    if (this.projectOperation?.kind === "open") throw new AgentActionBusyError("Wait for the project to finish opening before changing its source selection.");
+    const context = this.readCloudContext();
+    try {
+      if (context) updateProjectCloudContext(this.storage, context.contextId, current => ({ ...current, selection }));
+      else this.storage.setItem(RESOURCE_SELECTION_KEY, JSON.stringify(selection));
+    } catch (error) { this.reportProjectContextError(error); throw error; }
+    this.setState({ selection, projectContextError: undefined });
+  }
+
+  private readLegacyProjectValue(key: string): unknown {
+    try {
+      const serialized = this.storage.getItem(key);
+      if (serialized === null) return undefined;
+      try { return JSON.parse(serialized); }
+      catch { throw new Error("The legacy project context contains invalid JSON."); }
+    } catch (error) { this.reportProjectContextError(error); throw error; }
+  }
+
+  private readLegacyCloudReference(): CloudProjectReference | undefined {
+    try {
+      const value = this.readLegacyProjectValue(CLOUD_REFERENCE_KEY);
+      return value === undefined ? undefined : parseCloudProjectReference(value);
+    } catch (error) { this.reportProjectContextError(error); throw error; }
+  }
+
+  private readCloudContext(): ProjectCloudContext | undefined {
+    try { return readProjectCloudContext(this.storage); }
+    catch (error) { this.reportProjectContextError(error); throw error; }
+  }
+
+  private reportProjectContextError(error: unknown): void {
+    this.setState({ cloudReference: undefined, projectContextError: error instanceof Error ? error.message : "The project cloud context could not be read or saved." });
+  }
+
+  private beginProjectOperation(kind: ProjectOperationOwner["kind"]): ProjectOperationOwner {
+    if (this.projectOperation) throw new AgentActionBusyError("A cloud project is already being opened or saved.");
+    const context = this.readCloudContext();
+    const pending = this.unpersistedCloudSave;
+    if (kind === "save" && pending && pending.contextId === context?.contextId &&
+      pending.error.reference.accountEmail === this.state.account?.email) {
+      throw pending.error;
+    }
+    const owner: ProjectOperationOwner = {
+      kind, contextId: context?.contextId, accountGeneration: this.accountGeneration,
+      accountEmail: this.state.account?.email, reference: context ? context.reference : this.readLegacyCloudReference(),
+    };
+    this.projectOperation = owner;
+    return owner;
+  }
+
+  private assertProjectOwner(owner: ProjectOperationOwner): void {
+    const context = this.readCloudContext();
+    const reference = context ? context.reference : this.readLegacyCloudReference();
+    if (this.projectOperation !== owner || owner.accountGeneration !== this.accountGeneration ||
+      owner.accountEmail !== this.state.account?.email || owner.contextId !== context?.contextId ||
+      JSON.stringify(owner.reference) !== JSON.stringify(reference)) throw new OperationInterruptedError("superseded");
   }
 
   private clearSession(): void {
+    this.accountGeneration++;
     this.sessionStorage.removeItem(TIME_MACHINE_ACCESS_TOKEN_KEY);
     this.sessionStorage.removeItem(ACCOUNT_SESSION_KEY);
     // Storage and in-memory identity are cleared together, so no half
