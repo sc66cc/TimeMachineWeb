@@ -1315,12 +1315,17 @@ button {
 
 .plate-inspector:has(#inspector-content:not([hidden])) {
   opacity: 1;
+  pointer-events: auto;
 }
 
 #inspector-content {
   display: flex;
   gap: 5px;
   flex-wrap: wrap;
+}
+
+#inspector-content[hidden] {
+  display: none;
 }
 
 .map-caption {

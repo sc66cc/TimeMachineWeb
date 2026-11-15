@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import type {
-  ProjectDocumentV2TO,
-  ProjectRevisionSummaryRO,
+import AceternityWelcome from "./components/AceternityWelcome.vue";
+import DevelopmentConsole from "./components/DevelopmentConsole.vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, type WatchStopHandle } from "vue";
+import {
+  ProjectLayerType,
+  type ProjectRevisionSummaryRO,
 } from "@timemachine/generated-api";
 import {
   normalizePointStyleExpression,
+  POINT_SIZE_MIN_PIXELS,
+  POINT_SIZE_MAX_PIXELS,
   type PointStyleExpression,
 } from "@timemachine/point-runtime";
 import {
@@ -31,6 +35,7 @@ import {
   type ProjectLayerGroupSnapshot,
   type ProjectLayerSnapshot,
 } from "./project/project-session";
+import { PROJECT_STATE_EVENT, type ProjectStateDetail } from "./project/project-events";
 import {
   LAYER_GROUP_COLLAPSE_CHANGE_EVENT,
   LAYER_GROUP_OPACITY_CHANGE_EVENT,
@@ -49,9 +54,17 @@ import {
   type AgentActionId,
 } from "./agent-actions";
 import {
+  AgentActionAuthError,
   AgentActionBusyError,
+  AgentActionFailureError,
   AgentActionValidationError,
+  AgentActionUnsupportedError,
 } from "./agent-actions/registry";
+import { redactErrorMessage } from "./agent-actions/types";
+import type { OperationContext } from "./agent-actions/operation";
+import { readNativePointStyle, type NativePointStyle } from "./layers/native-point-style";
+import { readNativeLineStyle, NATIVE_LINE_WIDTH_MIN, NATIVE_LINE_WIDTH_MAX, type NativeLineStyle } from "./layers/native-line-style";
+import { readNativePolygonStyle, NATIVE_POLYGON_OUTLINE_WIDTH_MIN, NATIVE_POLYGON_OUTLINE_WIDTH_MAX, type NativePolygonStyle } from "./layers/native-polygon-style";
 import {
   requireV2Workspace,
   v2WorkspaceUnavailableReason,
@@ -80,6 +93,31 @@ const authPassword = ref("");
 /** Unity account/password is the default mode on the shared Server. */
 const authMode = ref<"account" | "email-code">("account");
 const phase1B = ref<Phase1BState>(phase1BCloudClient.snapshot);
+const projectState = ref<ProjectStateDetail>();
+const timelineMaximum = computed(() => projectState.value?.timeRange?.maxAgeMa ?? 538.8);
+const projectActionBusy = ref(false);
+const projectActionError = ref("");
+const projectReadOnly = computed(() => !projectState.value?.compatibility.writable);
+const projectReadOnlyReason = computed(() => projectState.value
+  ? "This project is read-only. Review the compatibility report and download its original input."
+  : "Project compatibility is being checked. Wait before editing the project.");
+const localSaveLabel = computed(() => projectState.value ? ({
+  dirty: "Unsaved local changes", saving: "Saving locally…", saved: "Saved locally", error: "Local save failed", readonly: "Read-only local project",
+})[projectState.value.localSave.status] : "Checking project compatibility…");
+const cloudSaveLabel = computed(() => projectState.value ? ({
+  idle: "Not saved to cloud", dirty: "Unsaved cloud changes", saving: "Saving to cloud…", saved: "Saved to cloud", error: "Cloud save failed", readonly: "Cloud save unavailable (read-only)",
+})[projectState.value.cloudSave.status] : "Waiting for project state");
+const projectReportOpen = computed(() => projectReadOnly.value || Boolean(projectActionError.value) ||
+  Boolean(phase1B.value.projectContextError) || Boolean(projectState.value?.compatibility.issues.length) ||
+  Boolean(projectState.value?.review) || projectState.value?.localSave.status === "error" || projectState.value?.cloudSave.status === "error");
+
+function requireProjectEditable(): void {
+  if (projectReadOnly.value) throw new AgentActionUnsupportedError(projectReadOnlyReason.value);
+}
+
+function handleProjectState(event: Event): void {
+  projectState.value = (event as CustomEvent<ProjectStateDetail>).detail;
+}
 
 type UploadStep = "select" | "map" | "run";
 
@@ -109,18 +147,49 @@ const uploadMapping = ref<ColumnMapping>({
 let uploadFile: File | undefined;
 let uploadAbort: AbortController | undefined;
 const defaultProjectSession = new ProjectSession();
-const layerRows = ref<ProjectLayerSnapshot[]>(
+const layerRows = ref<LayerStateDetail["layers"]>(
   defaultProjectSession.layerList,
 );
 const layerGroups = ref<ProjectLayerGroupSnapshot[]>(
   defaultProjectSession.groupList,
 );
 const layerSearch = ref("");
+const newGroupName = ref("");
+const newGroupParent = ref("");
+const groupActionBusy = ref(false);
+const groupActionError = ref("");
+const pointLayerActionBusy = ref(false);
+const pointLayerActionMessage = ref("");
+const pointLayerActionError = ref("");
+const newPointLayerName = ref("");
+const newPointLayerGroup = ref(String(defaultProjectSession.groupList[0]?.id ?? ""));
+const pointFixtureSourceRef = "fixture:goal-points-v1";
+const newLineLayerName = ref("");
+const newLineLayerGroup = ref(String(defaultProjectSession.groupList[0]?.id ?? ""));
+const lineFixtureSourceRef = "fixture:goal-lines-v1";
+const newPolygonLayerName = ref("");
+const newPolygonLayerGroup = ref(String(defaultProjectSession.groupList[0]?.id ?? ""));
+const polygonFixtureSourceRef = "fixture:goal-polygons-v1";
+const newRasterLayerName = ref("");
+const newRasterLayerGroup = ref(String(defaultProjectSession.groupList[0]?.id ?? ""));
+const newRasterLayerSelection = ref("");
+const rasterManifestSourceRef = "local:single-raster-manifest";
+const rasterOptions = ref<NonNullable<LayerStateDetail["rasterOptions"]>>([]);
+const defaultRasterId = ref<string | undefined>();
+const availableRasterIds = computed(() => new Set(rasterOptions.value.map(option => option.id)));
+const newAtlasLayerName = ref("");
+const newAtlasLayerGroup = ref(String(defaultProjectSession.groupList[0]?.id ?? ""));
+const atlasManifestSourceRef = "local:paleoatlas-manifest";
+const atlasSource = ref<LayerStateDetail["atlasSource"]>();
+const atlasSourceAvailable = computed(() => atlasSource.value?.sourceRef === atlasManifestSourceRef);
+const defaultLayerIds = new Set<number>(Object.values(RUNTIME_LAYER_IDS));
 const selectedLayerId = ref<number | undefined>();
 const draggedLayerId = ref<number | undefined>();
 const dropTargetLayerId = ref<number | undefined>();
 let toastTimer: number | undefined;
 let unsubscribePhase1B: (() => void) | undefined;
+const unsubscribeStateSections: (() => void)[] = [];
+let stopUiStateWatch: WatchStopHandle | undefined;
 
 const moduleItems = [
   { icon: "◇", label: "Layer" },
@@ -240,28 +309,95 @@ const ingestPlateModels = computed(() =>
     (model) => model.PlatePolygonCount > 0,
   ),
 );
+const layerQuery = computed(() => layerSearch.value.trim().toLocaleLowerCase());
+const groupsById = computed(() => new Map(layerGroups.value.map(group => [group.id, group])));
+const orderedLayerGroups = computed(() => {
+  const result: ProjectLayerGroupSnapshot[] = [];
+  const visit = (parentId?: number) => {
+    for (const group of layerGroups.value) {
+      if (group.parentId === parentId) { result.push(group); visit(group.id); }
+    }
+  };
+  visit();
+  return result;
+});
+const layerTreeRows = computed(() => orderedLayerGroups.value.flatMap(group => [
+  { key: `group:${group.id}`, group, layer: undefined as LayerStateDetail["layers"][number] | undefined },
+  ...layerRows.value.filter(layer => layer.groupId === group.id).map(layer => ({ key: `layer:${layer.id}`, group, layer })),
+]));
+
+/** Includes the group itself, then its ancestors. The session validates the tree. */
+function groupPath(groupId: number): ProjectLayerGroupSnapshot[] {
+  const path: ProjectLayerGroupSnapshot[] = [];
+  for (let group = groupsById.value.get(groupId); group; group = group.parentId === undefined ? undefined : groupsById.value.get(group.parentId)) path.push(group);
+  return path;
+}
+
+function groupNameMatches(groupId: number): boolean {
+  return groupPath(groupId).some(group => group.name.toLocaleLowerCase().includes(layerQuery.value));
+}
+
 const filteredLayerRows = computed(() => {
-  const query = layerSearch.value.trim().toLocaleLowerCase();
-  return query
+  return layerQuery.value
     ? layerRows.value.filter((layer) =>
-        layer.name.toLocaleLowerCase().includes(query),
+        layer.name.toLocaleLowerCase().includes(layerQuery.value) || groupNameMatches(layer.groupId),
       )
     : layerRows.value;
 });
-const visibleLayerGroups = computed(() =>
-  layerSearch.value
-    ? layerGroups.value.filter((group) =>
-        filteredLayerRows.value.some(
-          (layer) => layer.groupId === group.id,
-        ),
-      )
-    : layerGroups.value,
-);
+const visibleGroupIds = computed(() => {
+  if (!layerQuery.value) return new Set(layerGroups.value.filter(group => groupPath(group.id).slice(1).every(parent => !parent.collapsed)).map(group => group.id));
+  const visible = new Set<number>();
+  const includePath = (groupId: number) => groupPath(groupId).forEach(group => visible.add(group.id));
+  for (const layer of filteredLayerRows.value) includePath(layer.groupId);
+  for (const group of layerGroups.value) if (groupNameMatches(group.id)) includePath(group.id);
+  return visible;
+});
 
-function layersForGroup(groupId: number): ProjectLayerSnapshot[] {
-  return filteredLayerRows.value.filter(
-    (layer) => layer.groupId === groupId,
-  );
+function layerIsVisible(layer: ProjectLayerSnapshot): boolean {
+  return filteredLayerRows.value.includes(layer) && (Boolean(layerQuery.value) || groupPath(layer.groupId).every(group => !group.collapsed));
+}
+
+function groupDepth(groupId: number): number { return groupPath(groupId).length - 1; }
+
+function groupParentOptions(groupId: number): ProjectLayerGroupSnapshot[] {
+  return orderedLayerGroups.value.filter(group => !groupPath(group.id).some(parent => parent.id === groupId));
+}
+
+function groupIsNonempty(groupId: number): boolean {
+  return layerRows.value.some(layer => layer.groupId === groupId) || layerGroups.value.some(group => group.parentId === groupId);
+}
+
+async function executeGroupAction(id: AgentActionId, params: Record<string, unknown>): Promise<boolean> {
+  if (projectReadOnly.value) { groupActionError.value = projectReadOnlyReason.value; return false; }
+  if (groupActionBusy.value) return false;
+  groupActionBusy.value = true;
+  groupActionError.value = "";
+  try {
+    const result = await agentActions.execute(id, params);
+    if (!result.ok) { groupActionError.value = result.error.message; return false; }
+    return true;
+  } catch (error) {
+    groupActionError.value = redactErrorMessage(error instanceof Error ? error.message : String(error));
+    return false;
+  } finally { groupActionBusy.value = false; }
+}
+
+async function addLayerGroup(): Promise<void> {
+  const name = newGroupName.value.trim();
+  if (!name) return;
+  const group = { name, active: true, alpha: 1, collapsed: false, ...(newGroupParent.value ? { parentId: Number(newGroupParent.value) } : {}) };
+  if (await executeGroupAction(AGENT_ACTIONS.layerGroupAdd, { group })) newGroupName.value = "";
+}
+
+async function moveLayerGroup(groupId: number, event: Event): Promise<void> {
+  const select = event.currentTarget as HTMLSelectElement;
+  await executeGroupAction(AGENT_ACTIONS.layerGroupMove, { groupId, ...(select.value ? { parentId: Number(select.value) } : {}) });
+  // The native select already changed before the action; restore authoritative state on failure.
+  select.value = String(groupsById.value.get(groupId)?.parentId ?? "");
+}
+
+function matchingLayerCount(groupId: number): number {
+  return filteredLayerRows.value.filter((layer) => layer.groupId === groupId).length;
 }
 
 function layerVisibilityId(id: number): string {
@@ -270,25 +406,221 @@ function layerVisibilityId(id: number): string {
   if (id === RUNTIME_LAYER_IDS.raster) {
     return "single-raster-visibility";
   }
-  return "plate-visibility";
+  if (id === RUNTIME_LAYER_IDS.plateModel) return "plate-visibility";
+  return `layer-${id}-visibility`;
 }
 
-function layerSwatchClass(id: number): string {
-  if (id === RUNTIME_LAYER_IDS.atlas) return "atlas";
-  if (id === RUNTIME_LAYER_IDS.points) return "points";
-  if (id === RUNTIME_LAYER_IDS.raster) return "raster";
-  return "plates";
+function layerSwatchClass(layer: ProjectLayerSnapshot): string {
+  if (layer.type === ProjectLayerType.Atlas) return "atlas";
+  if (layer.type === ProjectLayerType.Point) return "points";
+  if (layer.type === ProjectLayerType.Line) return "lines";
+  if (layer.type === ProjectLayerType.Polygon) return "polygons";
+  if (layer.type === ProjectLayerType.Raster) return "raster";
+  return layer.type === ProjectLayerType.PlateModel ? "plates" : "unsupported";
+}
+
+function isSupportedLayerType(layer: ProjectLayerSnapshot): boolean {
+  return [ProjectLayerType.Point, ProjectLayerType.Line, ProjectLayerType.Polygon, ProjectLayerType.Raster,
+    ProjectLayerType.Atlas, ProjectLayerType.PlateModel].includes(layer.type);
+}
+
+function isOrdinaryPointLayer(layer: ProjectLayerSnapshot): boolean {
+  return layer.type === ProjectLayerType.Point && !defaultLayerIds.has(layer.id);
+}
+
+function isOrdinaryLineLayer(layer: ProjectLayerSnapshot): boolean {
+  return layer.type === ProjectLayerType.Line && !defaultLayerIds.has(layer.id);
+}
+
+function isOrdinaryPolygonLayer(layer: ProjectLayerSnapshot): boolean {
+  return layer.type === ProjectLayerType.Polygon && !defaultLayerIds.has(layer.id);
+}
+
+function isOrdinaryRasterLayer(layer: ProjectLayerSnapshot): boolean {
+  return layer.type === ProjectLayerType.Raster && !defaultLayerIds.has(layer.id);
+}
+
+function isOrdinaryAtlasLayer(layer: ProjectLayerSnapshot): boolean {
+  return layer.type === ProjectLayerType.Atlas && !defaultLayerIds.has(layer.id);
+}
+
+function canRetryLayer(layer: LayerStateDetail["layers"][number]): boolean {
+  return layer.runtimeStatus === "error" && (isOrdinaryPointLayer(layer) || isOrdinaryLineLayer(layer) ||
+    isOrdinaryPolygonLayer(layer) || layer.type === ProjectLayerType.Raster || layer.type === ProjectLayerType.Atlas);
+}
+
+function selectedRasterId(layer: ProjectLayerSnapshot): string {
+  return layer.rasterId === undefined ? defaultRasterId.value ?? ""
+    : typeof layer.rasterId === "string" ? layer.rasterId : "";
+}
+
+function rasterSelectionError(layer: ProjectLayerSnapshot): string {
+  if (layer.rasterId !== undefined && (typeof layer.rasterId !== "string" || !layer.rasterId.trim())) {
+    return "Saved raster selection is invalid.";
+  }
+  return availableRasterIds.value.has(selectedRasterId(layer)) ? "" : "Raster selection is unavailable in the manifest.";
+}
+
+const nativePointStyles = computed(() => new Map(layerRows.value.filter(isOrdinaryPointLayer).map(layer => {
+  let value: { style?: NativePointStyle; error?: string };
+  try { value = { style: readNativePointStyle(layer.pointStyle) }; }
+  catch (error) { value = { error: redactErrorMessage(error instanceof Error ? error.message : String(error)) }; }
+  return [layer.id, value];
+})));
+
+const nativeLineStyles = computed(() => new Map(layerRows.value.filter(isOrdinaryLineLayer).map(layer => {
+  let value: { style?: NativeLineStyle; error?: string };
+  try { value = { style: readNativeLineStyle(layer.lineStyle) }; }
+  catch (error) { value = { error: redactErrorMessage(error instanceof Error ? error.message : String(error)) }; }
+  return [layer.id, value];
+})));
+
+const nativePolygonStyles = computed(() => new Map(layerRows.value.filter(isOrdinaryPolygonLayer).map(layer => {
+  let value: { style?: NativePolygonStyle; error?: string };
+  try { value = { style: readNativePolygonStyle(layer.polygonStyle) }; }
+  catch (error) { value = { error: redactErrorMessage(error instanceof Error ? error.message : String(error)) }; }
+  return [layer.id, value];
+})));
+
+async function changeNativePointStyle(layer: ProjectLayerSnapshot, field: "singleColor" | "pointSize", event: Event): Promise<void> {
+  const input = event.currentTarget as HTMLInputElement;
+  const value = field === "pointSize" ? Number(input.value) : input.value;
+  await executePointLayerAction(AGENT_ACTIONS.layerSetStyle, { layerId: layer.id, style: { [field]: value } },
+    `Updating ${layer.name} style…`, `Style state updated for ${layer.name}.`);
+  const current = nativePointStyles.value.get(layer.id)?.style;
+  if (current) input.value = String(current[field]);
+}
+
+async function changeNativeLineStyle(layer: ProjectLayerSnapshot, field: "lineColor" | "lineWidth", event: Event): Promise<void> {
+  const input = event.currentTarget as HTMLInputElement;
+  const value = field === "lineWidth" ? Number(input.value) : input.value;
+  await executePointLayerAction(AGENT_ACTIONS.layerSetStyle, { layerId: layer.id, style: { [field]: value } },
+    `Updating ${layer.name} style…`, `Style state updated for ${layer.name}.`);
+  const current = nativeLineStyles.value.get(layer.id)?.style;
+  if (current) input.value = String(current[field]);
+}
+
+async function changeNativePolygonStyle(layer: ProjectLayerSnapshot, field: keyof NativePolygonStyle, event: Event): Promise<void> {
+  const input = event.currentTarget as HTMLInputElement;
+  const value = field === "outlineWidth" ? Number(input.value) : input.value;
+  await executePointLayerAction(AGENT_ACTIONS.layerSetStyle, { layerId: layer.id, style: { [field]: value } },
+    `Updating ${layer.name} style…`, `Style state updated for ${layer.name}.`);
+  const current = nativePolygonStyles.value.get(layer.id)?.style;
+  if (current) input.value = String(current[field]);
+}
+
+async function executePointLayerAction(actionId: string, params: Record<string, unknown>, pending: string, completed: string): Promise<boolean> {
+  if (projectReadOnly.value) { pointLayerActionError.value = projectReadOnlyReason.value; return false; }
+  if (pointLayerActionBusy.value) return false;
+  pointLayerActionBusy.value = true;
+  pointLayerActionMessage.value = pending;
+  pointLayerActionError.value = "";
+  try {
+    const result = await agentActions.execute(actionId, params);
+    if (!result.ok) {
+      pointLayerActionError.value = result.error.message;
+      pointLayerActionMessage.value = "";
+      return false;
+    }
+    pointLayerActionMessage.value = completed;
+    return true;
+  } catch (error) {
+    pointLayerActionError.value = redactErrorMessage(error instanceof Error ? error.message : String(error));
+    pointLayerActionMessage.value = "";
+    return false;
+  } finally { pointLayerActionBusy.value = false; }
+}
+
+async function removePointLayer(layer: ProjectLayerSnapshot): Promise<void> {
+  if (!isOrdinaryPointLayer(layer) && !isOrdinaryLineLayer(layer) && !isOrdinaryPolygonLayer(layer) && !isOrdinaryRasterLayer(layer) && !isOrdinaryAtlasLayer(layer)) return;
+  await executePointLayerAction(AGENT_ACTIONS.layerRemove, { layerId: layer.id }, `Removing ${layer.name}…`, `Removed ${layer.name}.`);
+}
+
+async function retryLayer(layer: LayerStateDetail["layers"][number]): Promise<void> {
+  if (!canRetryLayer(layer)) return;
+  await executePointLayerAction(AGENT_ACTIONS.layerRetry, { layerId: layer.id }, `Retrying ${layer.name}…`, `Retried ${layer.name}.`);
+}
+
+async function addPointLayer(): Promise<void> {
+  const name = newPointLayerName.value.trim();
+  const groupId = Number(newPointLayerGroup.value);
+  if (!name || !groupsById.value.has(groupId)) return;
+  const layer = { name, type: ProjectLayerType.Point, sourceRef: pointFixtureSourceRef, groupId, active: true, alpha: 1 };
+  if (await executePointLayerAction(AGENT_ACTIONS.layerAdd, { layer }, `Adding ${name}…`, `Added ${name}.`)) newPointLayerName.value = "";
+}
+
+async function addLineLayer(): Promise<void> {
+  const name = newLineLayerName.value.trim();
+  const groupId = Number(newLineLayerGroup.value);
+  if (!name || !groupsById.value.has(groupId)) return;
+  const layer = { name, type: ProjectLayerType.Line, sourceRef: lineFixtureSourceRef, groupId, active: true, alpha: 1 };
+  if (await executePointLayerAction(AGENT_ACTIONS.layerAdd, { layer }, `Adding ${name}…`, `Added ${name}.`)) newLineLayerName.value = "";
+}
+
+async function addPolygonLayer(): Promise<void> {
+  const name = newPolygonLayerName.value.trim();
+  const groupId = Number(newPolygonLayerGroup.value);
+  if (!name || !groupsById.value.has(groupId)) return;
+  const layer = { name, type: ProjectLayerType.Polygon, sourceRef: polygonFixtureSourceRef, groupId, active: true, alpha: 1 };
+  if (await executePointLayerAction(AGENT_ACTIONS.layerAdd, { layer }, `Adding ${name}…`, `Added ${name}.`)) newPolygonLayerName.value = "";
+}
+
+async function addRasterLayer(): Promise<void> {
+  const name = newRasterLayerName.value.trim();
+  const groupId = Number(newRasterLayerGroup.value);
+  const rasterId = newRasterLayerSelection.value;
+  if (!name || !groupsById.value.has(groupId) || !availableRasterIds.value.has(rasterId)) return;
+  const layer = { name, type: ProjectLayerType.Raster, sourceRef: rasterManifestSourceRef, groupId, active: true, alpha: 1, rasterId };
+  if (await executePointLayerAction(AGENT_ACTIONS.layerAdd, { layer }, `Adding ${name}…`, `Added ${name}.`)) newRasterLayerName.value = "";
+}
+
+async function addAtlasLayer(): Promise<void> {
+  const name = newAtlasLayerName.value.trim();
+  const groupId = Number(newAtlasLayerGroup.value);
+  if (!name || !groupsById.value.has(groupId) || !atlasSourceAvailable.value) return;
+  const layer = { name, type: ProjectLayerType.Atlas, sourceRef: atlasManifestSourceRef, groupId, active: true, alpha: 1 };
+  if (await executePointLayerAction(AGENT_ACTIONS.layerAdd, { layer }, `Adding ${name}…`, `Added ${name}.`)) newAtlasLayerName.value = "";
+}
+
+async function changeRasterSelection(layer: ProjectLayerSnapshot, event: Event): Promise<void> {
+  const select = event.currentTarget as HTMLSelectElement;
+  if (availableRasterIds.value.has(select.value)) {
+    await executePointLayerAction(AGENT_ACTIONS.rasterSelect, { layerId: layer.id, rasterId: select.value },
+      `Selecting raster for ${layer.name}…`, `Raster selection updated for ${layer.name}.`);
+  }
+  const current = layerRows.value.find(item => item.id === layer.id);
+  select.value = current ? selectedRasterId(current) : "";
 }
 
 function showLayerStyle(id = selectedLayerId.value): void {
+  const layerId = id ?? layerRows.value[0]?.id;
+  const layer = layerRows.value.find((item) => item.id === layerId);
+  if (!layer) {
+    throw new AgentActionValidationError("The requested layer is not available.");
+  }
+  if (!filteredLayerRows.value.some((item) => item.id === layerId)) layerSearch.value = "";
+  for (const id of groupPath(layer.groupId).map(group => group.id).reverse()) {
+    const group = groupsById.value.get(id);
+    if (group?.collapsed) toggleGroup(group);
+  }
   activeSidebarTab.value = "layers";
-  selectedLayerId.value = id ?? layerRows.value[0]?.id;
+  selectedLayerId.value = layerId;
+}
+
+function closeLayerStyle(): void {
+  selectedLayerId.value = undefined;
+}
+
+function toggleLayerStyle(id: number): void {
+  if (selectedLayerId.value === id) closeLayerStyle();
+  else showLayerStyle(id);
 }
 
 function changeLayerVisibility(
   layer: ProjectLayerSnapshot,
   event: Event,
 ): void {
+  requireProjectEditable();
   const active = (event.currentTarget as HTMLInputElement).checked;
   layer.active = active;
   window.dispatchEvent(
@@ -302,6 +634,7 @@ function changeLayerOpacity(
   layer: ProjectLayerSnapshot,
   event: Event,
 ): void {
+  requireProjectEditable();
   const alpha = Number((event.currentTarget as HTMLInputElement).value) / 100;
   layer.alpha = alpha;
   window.dispatchEvent(
@@ -315,6 +648,7 @@ function publishPointStyle(
   layer: ProjectLayerSnapshot,
   style: PointStyleExpression,
 ): void {
+  requireProjectEditable();
   const normalized = normalizePointStyleExpression(style);
   layer.pointStyle = normalized;
   window.dispatchEvent(
@@ -368,7 +702,7 @@ function changePointFilter(
 }
 
 function beginLayerDrag(event: DragEvent, id: number): void {
-  if (layerSearch.value) {
+  if (projectReadOnly.value || layerSearch.value) {
     event.preventDefault();
     return;
   }
@@ -385,6 +719,7 @@ function finishLayerDrag(): void {
 }
 
 function dropLayer(targetId: number): void {
+  requireProjectEditable();
   const sourceId = draggedLayerId.value;
   finishLayerDrag();
   if (sourceId === undefined || sourceId === targetId) {
@@ -412,6 +747,7 @@ function dropLayer(targetId: number): void {
 }
 
 function dropLayerIntoGroup(groupId: number): void {
+  requireProjectEditable();
   const sourceId = draggedLayerId.value;
   finishLayerDrag();
   if (sourceId === undefined) {
@@ -456,6 +792,7 @@ function changeGroupVisibility(
   group: ProjectLayerGroupSnapshot,
   event: Event,
 ): void {
+  requireProjectEditable();
   group.active = (event.currentTarget as HTMLInputElement).checked;
   window.dispatchEvent(
     new CustomEvent(LAYER_GROUP_VISIBILITY_CHANGE_EVENT, {
@@ -468,6 +805,7 @@ function changeGroupOpacity(
   group: ProjectLayerGroupSnapshot,
   event: Event,
 ): void {
+  requireProjectEditable();
   group.alpha =
     Number((event.currentTarget as HTMLInputElement).value) / 100;
   window.dispatchEvent(
@@ -478,6 +816,7 @@ function changeGroupOpacity(
 }
 
 function toggleGroup(group: ProjectLayerGroupSnapshot): void {
+  requireProjectEditable();
   group.collapsed = !group.collapsed;
   window.dispatchEvent(
     new CustomEvent(LAYER_GROUP_COLLAPSE_CHANGE_EVENT, {
@@ -490,6 +829,18 @@ function handleLayerState(event: Event): void {
   const detail = (event as CustomEvent<LayerStateDetail>).detail;
   layerGroups.value = detail.groups.map((group) => ({ ...group }));
   layerRows.value = detail.layers.map((layer) => ({ ...layer }));
+  rasterOptions.value = (detail.rasterOptions ?? []).map(({ id, label }) => ({ id, label }));
+  defaultRasterId.value = detail.defaultRasterId;
+  atlasSource.value = detail.atlasSource ? { ...detail.atlasSource } : undefined;
+  if (!availableRasterIds.value.has(newRasterLayerSelection.value)) {
+    newRasterLayerSelection.value = detail.defaultRasterId && availableRasterIds.value.has(detail.defaultRasterId) ? detail.defaultRasterId : "";
+  }
+  if (newGroupParent.value && !groupsById.value.has(Number(newGroupParent.value))) newGroupParent.value = "";
+  if (newPointLayerGroup.value && !groupsById.value.has(Number(newPointLayerGroup.value))) newPointLayerGroup.value = "";
+  if (newLineLayerGroup.value && !groupsById.value.has(Number(newLineLayerGroup.value))) newLineLayerGroup.value = "";
+  if (newPolygonLayerGroup.value && !groupsById.value.has(Number(newPolygonLayerGroup.value))) newPolygonLayerGroup.value = "";
+  if (newRasterLayerGroup.value && !groupsById.value.has(Number(newRasterLayerGroup.value))) newRasterLayerGroup.value = "";
+  if (newAtlasLayerGroup.value && !groupsById.value.has(Number(newAtlasLayerGroup.value))) newAtlasLayerGroup.value = "";
   if (
     selectedLayerId.value !== undefined &&
     !layerRows.value.some((layer) => layer.id === selectedLayerId.value)
@@ -516,8 +867,13 @@ function segmentStyle(segment: TimelineSegment): Record<string, string> {
   return {
     background: segment.color,
     color: relativeLuminance(segment.color) < 0.36 ? "#fff" : "#24343b",
-    flex: `${segment.weight} 1 0`,
+    flex: `${segment.weight} 1 0px`,
   };
+}
+
+function timelineExtensionStyle(segments: TimelineSegment[]): Record<string, string> {
+  const originalWeight = segments.reduce((total, segment) => total + segment.weight, 0);
+  return segmentStyle({ label: "", color: "#d8dde2", weight: (timelineMaximum.value - 538.8) / 538.8 * originalWeight });
 }
 
 function toggleAccountMenu(): void {
@@ -555,16 +911,20 @@ async function requestProjectSave(): Promise<void> {
     );
     return;
   }
-  // The same registered action the facade exposes, so both paths share one
-  // implementation and one set of checks.
-  const result = await agentActions.execute(AGENT_ACTIONS.projectSave);
-  if (!result.ok) {
-    showToast(result.error.message);
-    return;
-  }
-  showToast(
-    `Cloud revision ${String(result.data?.revisionNumber ?? "")} saved`,
-  );
+  await executeProjectAction(AGENT_ACTIONS.projectSave, {}, "Cloud project saved");
+}
+
+async function executeProjectAction(actionId: string, params: Record<string, unknown>, message: string): Promise<void> {
+  if (projectActionBusy.value) return;
+  projectActionBusy.value = true;
+  projectActionError.value = "";
+  try {
+    const result = await agentActions.execute(actionId, params);
+    if (!result.ok) { projectActionError.value = result.error.message; return; }
+    showToast(message);
+  } catch (error) {
+    projectActionError.value = redactErrorMessage(error instanceof Error ? error.message : String(error));
+  } finally { projectActionBusy.value = false; }
 }
 
 async function sendLoginCode(): Promise<void> {
@@ -583,6 +943,9 @@ async function sendLoginCode(): Promise<void> {
  * sent.
  */
 async function requestLoginCode(): Promise<void> {
+  if (authBusy.value) {
+    throw new AgentActionBusyError("An authentication request is already running.");
+  }
   if (!authEmail.value.trim()) {
     throw new AgentActionValidationError(
       "auth.sendCode requires a non-empty 'email'.",
@@ -604,66 +967,71 @@ async function requestLoginCode(): Promise<void> {
  * masked by a previously cached account. The UI wrappers below and the
  * `auth.login` action both call these.
  */
-async function signInWithUnityAccount(
-  account: string,
-  password: string,
+async function signIn(
+  mode: "account" | "email-code",
+  identifier: string,
+  secret: string,
 ): Promise<Phase1BState> {
-  if (!account.trim()) {
-    throw new AgentActionValidationError(
-      "auth.login requires a non-empty 'account'.",
-    );
+  if (authBusy.value) {
+    throw new AgentActionBusyError("An authentication request is already running.");
   }
-  if (!password) {
-    throw new AgentActionValidationError("auth.login requires a 'password'.");
+  authBusy.value = true;
+  const normalizedSecret = mode === "email-code" ? secret.trim() : secret;
+  try {
+    const accountMode = mode === "account";
+    if (!identifier.trim()) {
+      throw new AgentActionValidationError(
+        `auth.login requires a non-empty '${accountMode ? "account" : "email"}'.`,
+      );
+    }
+    if (accountMode ? !secret : !secret.trim()) {
+      throw new AgentActionValidationError(
+        `auth.login requires a non-empty '${accountMode ? "password" : "code"}'.`,
+      );
+    }
+    authMode.value = mode;
+    if (accountMode) authAccount.value = identifier;
+    else authEmail.value = identifier;
+    const state = accountMode
+      ? await phase1BCloudClient.loginWithPassword(identifier, secret)
+      : await phase1BCloudClient.login(identifier, normalizedSecret);
+    if (!state.account) {
+      throw new AgentActionValidationError("Sign-in did not produce a session.");
+    }
+    authDialogVisible.value = false;
+    return state;
+  } catch (error) {
+    // Verification codes are also secrets even though the general API uses
+    // "code" for ordinary business error codes elsewhere.
+    const message = redactErrorMessage(error instanceof Error ? error.message : String(error), { secret, normalizedSecret });
+    throw error instanceof AgentActionFailureError
+      ? new AgentActionFailureError(error.kind, message)
+      : new Error(message);
+  } finally {
+    authBusy.value = false;
+    authPassword.value = "";
+    authCode.value = "";
   }
-  authAccount.value = account;
-  authPassword.value = password;
-  return phase1BCloudClient.loginWithPassword(account, password);
-}
-
-async function signInWithVerificationCode(
-  email: string,
-  code: string,
-): Promise<Phase1BState> {
-  if (!email.trim()) {
-    throw new AgentActionValidationError(
-      "auth.login requires a non-empty 'email'.",
-    );
-  }
-  if (!code.trim()) {
-    throw new AgentActionValidationError("auth.login requires a non-empty 'code'.");
-  }
-  authEmail.value = email;
-  authCode.value = code;
-  return phase1BCloudClient.login(email, code);
 }
 
 /** UI wrapper: the password field never lingers in component state. */
 async function signInWithPassword(): Promise<void> {
-  authBusy.value = true;
+  const password = authPassword.value;
   try {
-    await signInWithUnityAccount(authAccount.value, authPassword.value);
-    authDialogVisible.value = false;
+    await signIn("account", authAccount.value, password);
     showToast("Signed in and shared catalog refreshed");
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error));
-  } finally {
-    authBusy.value = false;
-    authPassword.value = "";
+    showToast(redactErrorMessage(error instanceof Error ? error.message : String(error), { password }));
   }
 }
 
 async function signInWithEmailCode(): Promise<void> {
-  authBusy.value = true;
+  const code = authCode.value;
   try {
-    await signInWithVerificationCode(authEmail.value, authCode.value);
-    authDialogVisible.value = false;
-    authCode.value = "";
+    await signIn("email-code", authEmail.value, code);
     showToast("Signed in and shared catalog refreshed");
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error));
-  } finally {
-    authBusy.value = false;
+    showToast(redactErrorMessage(error instanceof Error ? error.message : String(error), { secret: code }));
   }
 }
 
@@ -674,9 +1042,12 @@ async function logout(): Promise<void> {
 }
 
 /** Reports the real outcome instead of always announcing success. */
-async function refreshCloudWorkspace(): Promise<Phase1BState> {
+async function refreshCloudWorkspace(context?: OperationContext): Promise<Phase1BState> {
   try {
-    const state = await phase1BCloudClient.refreshCatalogs();
+    const state = await phase1BCloudClient.refreshCatalogs(context ? {
+      signal: context.signal,
+      context: { traceId: context.traceId, jobId: context.jobId, actionId: AGENT_ACTIONS.catalogRefresh },
+    } : undefined);
     if (
       state.sharedPlateModelsStatus === "error" ||
       state.sharedPlateModelsStatus === "incomplete"
@@ -697,6 +1068,7 @@ async function refreshCloudWorkspace(): Promise<Phase1BState> {
 }
 
 function selectPlateModel(versionId: number): void {
+  requireProjectEditable();
   phase1BCloudClient.selectPlateModel(versionId);
   showToast("Versioned plate model selected; reloading…");
   window.setTimeout(() => window.location.reload(), 280);
@@ -704,18 +1076,21 @@ function selectPlateModel(versionId: number): void {
 
 /** Selects a shared (V1) plate model by its `UserPlateModel` ID. */
 function selectSharedPlateModel(plateModelId: number): void {
+  requireProjectEditable();
   phase1BCloudClient.selectSharedPlateModel(plateModelId);
   showToast(`Shared plate model ${plateModelId} selected; reloading…`);
   window.setTimeout(() => window.location.reload(), 280);
 }
 
 function selectLocalPlateModelDemo(): void {
+  requireProjectEditable();
   phase1BCloudClient.selectLocalPlateModelDemo();
   showToast("Local demo plate model selected; reloading…");
   window.setTimeout(() => window.location.reload(), 280);
 }
 
 function selectDataset(versionId: number): void {
+  requireProjectEditable();
   phase1BCloudClient.selectDataset(versionId);
   showToast("Dataset selected; reloading its versioned manifest…");
   window.setTimeout(() => window.location.reload(), 280);
@@ -724,15 +1099,8 @@ function selectDataset(versionId: number): void {
 async function openCloudProject(
   project: ProjectRevisionSummaryRO,
 ): Promise<void> {
-  // Failures propagate: the caller decides whether that is a toast or a
-  // reported action failure.
-  const document = await phase1BCloudClient.openProject(project);
-  window.dispatchEvent(
-    new CustomEvent<{ document: ProjectDocumentV2TO }>(
-      "timemachine:cloud-project-open",
-      { detail: { document } },
-    ),
-  );
+  if (projectReadOnly.value) { projectActionError.value = projectReadOnlyReason.value; return; }
+  await executeProjectAction(AGENT_ACTIONS.projectOpen, { revisionId: foreignKeyValue(project.Revision) }, "Cloud project opened");
 }
 
 function handleProjectSaved(event: Event): void {
@@ -749,15 +1117,19 @@ function handleAuthRequired(): void {
   authDialogVisible.value = true;
 }
 
-function openUploadWizard(): void {
+function requireUploadAccess(): void {
+  requireProjectEditable();
+  requireV2Workspace(phase1B.value.v2WorkspaceAvailable, "dataset ingest");
   if (!phase1B.value.account) {
     authDialogVisible.value = true;
-    showToast(
-      phase1B.value.status === "disabled"
-        ? phase1B.value.message
-        : "Sign in to upload a dataset",
-    );
-    return;
+    throw new AgentActionAuthError("Sign in to upload a dataset.");
+  }
+}
+
+function openUploadWizard(): void {
+  requireUploadAccess();
+  if (uploadBusy.value) {
+    throw new AgentActionBusyError("An ingest job is already running.");
   }
   uploadFile = undefined;
   uploadPreview.value = undefined;
@@ -776,6 +1148,30 @@ function openUploadWizard(): void {
     ? foreignKeyValue(firstPlateModel.PlateModel)
     : 0;
   uploadDialogVisible.value = true;
+}
+
+function showUploadWizard(): void {
+  try { openUploadWizard(); }
+  catch (error) { showToast(redactErrorMessage(error instanceof Error ? error.message : String(error))); }
+}
+
+function goBackInUploadWizard(step: unknown = "select"): void {
+  requireUploadAccess();
+  if (uploadBusy.value) {
+    throw new AgentActionBusyError("An ingest job is already running.");
+  }
+  if (!uploadDialogVisible.value) {
+    throw new AgentActionValidationError("Open the upload wizard before changing its step.");
+  }
+  if (step !== "select" && step !== "map" && step !== "run") {
+    throw new AgentActionValidationError("upload.back 'step' must be 'select', 'map' or 'run'.");
+  }
+  uploadStep.value = step;
+}
+
+function showUploadStep(step: UploadStep): void {
+  try { goBackInUploadWizard(step); }
+  catch (error) { showToast(redactErrorMessage(error instanceof Error ? error.message : String(error))); }
 }
 
 function closeUploadWizard(): void {
@@ -967,26 +1363,15 @@ function registerAgentActions(): void {
     }
     // The signed-in state comes from the value THIS call returned, never from
     // the previously cached session, so a stale account cannot fake success.
-    const state =
-      mode === "account"
-        ? await signInWithUnityAccount(
-            String(params.account ?? ""),
-            String(params.password ?? ""),
-          )
-        : await signInWithVerificationCode(
-            String(params.email ?? ""),
-            String(params.code ?? ""),
-          );
-    if (!state.account) {
-      throw new AgentActionValidationError("Sign-in did not produce a session.");
-    }
-    authDialogVisible.value = false;
-    authPassword.value = "";
-    authCode.value = "";
+    const state = await signIn(
+      mode,
+      String((mode === "account" ? params.account : params.email) ?? ""),
+      String((mode === "account" ? params.password : params.code) ?? ""),
+    );
     // Only a safe session summary is returned; no token, password or digest.
     return {
       data: {
-        accountName: state.account.name,
+        accountName: state.account!.name,
         signedIn: true,
         status: state.status,
         v2WorkspaceAvailable: state.v2WorkspaceAvailable,
@@ -1013,8 +1398,8 @@ function registerAgentActions(): void {
   });
 
   // --- Catalog and model selection ----------------------------------------
-  ready(AGENT_ACTIONS.catalogRefresh, async () => {
-    const state = await refreshCloudWorkspace();
+  ready(AGENT_ACTIONS.catalogRefresh, async (_params, context) => {
+    const state = await refreshCloudWorkspace(context);
     if (
       state.sharedPlateModelsStatus === "error" ||
       state.sharedPlateModelsStatus === "incomplete"
@@ -1104,32 +1489,8 @@ function registerAgentActions(): void {
     return { data: { accepted: true }, reloadRequired: true };
   });
 
-  // --- Cloud projects (V2 only) -------------------------------------------
-  ready(AGENT_ACTIONS.projectOpen, async (params) => {
-    requireV2Workspace(
-      phase1B.value.v2WorkspaceAvailable,
-      "cloud projects",
-    );
-    const project = phase1B.value.projects.find(
-      (item) => foreignKeyValue(item.Revision) === params.revisionId,
-    );
-    if (!project) {
-      throw new AgentActionValidationError(
-        `No cloud project revision ${String(params.revisionId)} in the catalog.`,
-      );
-    }
-    // main.ts saves the opened session and reloads; the caller verifies the
-    // reload through bootId rather than assuming the navigation happened.
-    await openCloudProject(project);
-    return { data: { accepted: true }, reloadRequired: true };
-  });
-
   // --- Upload wizard (V2 only) --------------------------------------------
   ready(AGENT_ACTIONS.uploadOpen, async () => {
-    requireV2Workspace(
-      phase1B.value.v2WorkspaceAvailable,
-      "dataset ingest",
-    );
     openUploadWizard();
     return {};
   });
@@ -1140,16 +1501,7 @@ function registerAgentActions(): void {
   });
 
   ready(AGENT_ACTIONS.uploadBack, (params) => {
-    const step = params.step === undefined ? undefined : (params.step as string);
-    if (step !== undefined && !["select", "map", "run"].includes(step)) {
-      throw new AgentActionValidationError(
-        "upload.back 'step' must be 'select', 'map' or 'run'.",
-      );
-    }
-    if (uploadBusy.value) {
-      throw new AgentActionBusyError("An ingest job is already running.");
-    }
-    uploadStep.value = (step ?? "select") as UploadStep;
+    goBackInUploadWizard(params.step);
     return { data: { step: uploadStep.value } };
   });
 
@@ -1236,6 +1588,10 @@ function registerAgentActions(): void {
     );
     return { data: { layerId: selectedLayerId.value ?? null } };
   });
+  ready(AGENT_ACTIONS.layerStyleClose, () => {
+    closeLayerStyle();
+    return { data: { layerId: null } };
+  });
   ready(AGENT_ACTIONS.moduleSelect, (params) => {
     const moduleName = params.module;
     if (
@@ -1260,8 +1616,8 @@ function registerAgentActions(): void {
   // the handler again. Nothing here drops or re-registers a handler.
   const v2Actions: [AgentActionId, "cloud projects" | "dataset ingest"][] = [
     [AGENT_ACTIONS.datasetSelect, "cloud projects"],
-    [AGENT_ACTIONS.projectOpen, "cloud projects"],
     [AGENT_ACTIONS.uploadOpen, "dataset ingest"],
+    [AGENT_ACTIONS.uploadBack, "dataset ingest"],
     [AGENT_ACTIONS.uploadRun, "dataset ingest"],
     [AGENT_ACTIONS.uploadCancel, "dataset ingest"],
   ];
@@ -1274,35 +1630,62 @@ function registerAgentActions(): void {
   }
 
   // --- State sections -----------------------------------------------------
-  agentActions.registerStateSection("session", () => sessionSummary());
-  agentActions.registerStateSection("catalog", () => ({
-    error: phase1B.value.sharedPlateModelsError,
-    mineIds: [...phase1B.value.sharedPlateModelsMineIds],
-    // Only the scalar fields the UI needs; the raw PlateModelSimpleRO objects
-    // stay out of the snapshot.
-    models: phase1B.value.sharedPlateModels.map((model) => ({
-      accessRange: foreignKeyValue(model.AccessRange),
-      ageEndMa: model.AgeEnd,
-      ageStartMa: model.AgeStart,
-      id: foreignKeyValue(model.ID),
-      name: model.Name || "(unnamed)",
+  unsubscribeStateSections.push(
+    agentActions.registerStateSection("session", () => sessionSummary()),
+    agentActions.registerStateSection("catalog", () => ({
+      error: phase1B.value.sharedPlateModelsError,
+      mineIds: [...phase1B.value.sharedPlateModelsMineIds],
+      // Only the scalar fields the UI needs; the raw PlateModelSimpleRO objects
+      // stay out of the snapshot.
+      models: phase1B.value.sharedPlateModels.map((model) => ({
+        accessRange: foreignKeyValue(model.AccessRange),
+        ageEndMa: model.AgeEnd,
+        ageStartMa: model.AgeStart,
+        id: foreignKeyValue(model.ID),
+        name: model.Name || "(unnamed)",
+      })),
+      status: phase1B.value.sharedPlateModelsStatus,
+      total: phase1B.value.sharedPlateModelsTotal,
     })),
-    status: phase1B.value.sharedPlateModelsStatus,
-    total: phase1B.value.sharedPlateModelsTotal,
-  }));
-  agentActions.registerStateSection("selection", () => ({
-    ...phase1B.value.selection,
-  }));
-  agentActions.registerStateSection("ui", () => ({
+    agentActions.registerStateSection("selection", () => ({
+      ...phase1B.value.selection,
+    })),
+    agentActions.registerStateSection("ui", uiSnapshot),
+  );
+}
+
+/** Only safe UI controls and progress; never form credentials or file contents. */
+function uiSnapshot(): Record<string, unknown> {
+  const styleLayer = filteredLayerRows.value.find((layer) => layer.id === selectedLayerId.value);
+  return {
     accountMenuOpen: accountMenuVisible.value,
     activeSidebarTab: activeSidebarTab.value,
+    activeModule: activeModule.value,
+    selectedLayerId: selectedLayerId.value ?? null,
+    layerSearch: layerSearch.value,
+    layerStyleOpen: activeSidebarTab.value === "layers" && Boolean(styleLayer && layerIsVisible(styleLayer)),
     authDialogOpen: authDialogVisible.value,
     authMode: authMode.value,
     busy: authBusy.value || uploadBusy.value,
+    authBusy: authBusy.value,
+    uploadBusy: uploadBusy.value,
     toolbarCollapsed: toolbarCollapsed.value,
     uploadStep: uploadStep.value,
     uploadWizardOpen: uploadDialogVisible.value,
-  }));
+    uploadProgress: uploadProgress.value,
+    uploadStage: uploadStage.value,
+    // The registry applies the same redaction as all other state providers.
+    uploadMessage: uploadMessage.value,
+    uploadError: uploadError.value,
+    uploadJobId: uploadJobId.value,
+    pointLayerActionBusy: pointLayerActionBusy.value,
+    pointLayerActionMessage: pointLayerActionMessage.value,
+    pointLayerActionError: pointLayerActionError.value,
+    projectReadOnly: projectReadOnly.value,
+    projectStateReady: Boolean(projectState.value),
+    projectActionBusy: projectActionBusy.value,
+    projectActionError: projectActionError.value,
+  };
 }
 
 /** Safe session summary: never contains the access token. */
@@ -1321,27 +1704,37 @@ onMounted(() => {
     if (state.account && !authEmail.value) {
       authEmail.value = state.account.email;
     }
+    agentActions.notifyStateChanged();
   });
   registerAgentActions();
+  stopUiStateWatch = watch(uiSnapshot, () => agentActions.notifyStateChanged("ui"));
   void phase1BCloudClient.initialize();
   window.addEventListener("timemachine:project-saved", handleProjectSaved);
   window.addEventListener("timemachine:project-save-error", handleProjectSaveError);
   window.addEventListener("timemachine:auth-required", handleAuthRequired);
   window.addEventListener(LAYER_STATE_EVENT, handleLayerState);
+  window.addEventListener(PROJECT_STATE_EVENT, handleProjectState);
 });
 
 onBeforeUnmount(() => {
+  stopUiStateWatch?.();
+  unsubscribeStateSections.forEach((unsubscribe) => unsubscribe());
+  authPassword.value = "";
+  authCode.value = "";
   unsubscribePhase1B?.();
   window.removeEventListener("timemachine:project-saved", handleProjectSaved);
   window.removeEventListener("timemachine:project-save-error", handleProjectSaveError);
   window.removeEventListener("timemachine:auth-required", handleAuthRequired);
   window.removeEventListener(LAYER_STATE_EVENT, handleLayerState);
+  window.removeEventListener(PROJECT_STATE_EVENT, handleProjectState);
   window.clearTimeout(toastTimer);
 });
 </script>
 
 <template>
   <div class="viewport">
+    <AceternityWelcome />
+    <DevelopmentConsole />
     <div class="stage">
       <header class="topbar">
         <button
@@ -1357,24 +1750,28 @@ onBeforeUnmount(() => {
         <button
           class="top-action"
           type="button"
+          :disabled="projectReadOnly || projectActionBusy || projectState?.localSave.status === 'saving'"
+          data-action="project.saveLocal"
+          @click="executeProjectAction(AGENT_ACTIONS.projectSaveLocal, {}, 'Local draft saved')"
+        >Save locally</button>
+        <button
+          class="top-action"
+          type="button"
+          :disabled="projectReadOnly || !projectState?.compatibility.cloudWritable || projectActionBusy || projectState?.cloudSave.status === 'saving' || Boolean(phase1B.projectContextError)"
           data-action="project.save"
           @click="requestProjectSave"
         >
           <span>⇧</span> Save to Cloud
         </button>
         <span class="draft-pill">
-          {{
-            phase1BCloudClient.getCloudReference()
-              ? `Cloud r${phase1BCloudClient.getCloudReference()?.revisionNumber}`
-              : "Local Draft"
-          }}
+          {{ phase1B.projectContextError ? 'Cloud context error' : cloudSaveLabel }}
         </span>
         <input
           id="project-name"
           class="project-name"
           value="Untitled_6/5/2025 6:10:11 AM"
           aria-label="Project name"
-          data-action="project.setName"
+          :disabled="projectReadOnly" data-action="project.setName"
         />
         <div class="app-title">Time Machine</div>
         <div class="topbar__spacer"></div>
@@ -1405,7 +1802,7 @@ onBeforeUnmount(() => {
         <button
           class="top-action"
           type="button"
-          data-action="publish.run"
+          :disabled="projectReadOnly" data-action="publish.run"
           @click="showToast('Publish requires Phase 1B server connection')"
         >
           <span>➤</span> Publish
@@ -1437,6 +1834,45 @@ onBeforeUnmount(() => {
           data-action="ui.info.open"
         >ⓘ</button>
       </header>
+
+      <details class="project-persistence" aria-label="Project persistence" :open="projectReportOpen">
+        <summary>
+          <span data-testid="local-save-status" :data-state="projectState?.localSave.status ?? 'checking'">{{ localSaveLabel }}</span>
+          <span data-testid="cloud-save-status" :data-state="projectState?.cloudSave.status ?? 'waiting'">{{ cloudSaveLabel }}</span>
+        </summary>
+        <template v-if="projectState">
+          <p v-if="projectState.localSave.savedAt">Last local save: {{ projectState.localSave.savedAt }} · revision {{ projectState.localSave.savedRevision }}</p>
+          <p v-if="projectState.cloudSave.revisionNumber !== undefined">Cloud revision {{ projectState.cloudSave.revisionNumber }}</p>
+          <p v-if="projectState.localSave.status === 'error'" data-testid="local-save-error" role="alert">{{ redactErrorMessage(projectState.localSave.message ?? 'The local draft was not saved.') }}</p>
+          <p v-if="projectState.cloudSave.status === 'error'" data-testid="cloud-save-error" role="alert">{{ redactErrorMessage(projectState.cloudSave.message ?? 'The cloud revision was not saved.') }}</p>
+          <p v-if="projectReadOnly" class="project-readonly-reason">Read-only project. Review the preserved input before making changes.</p>
+          <p v-else-if="!projectState.compatibility.cloudWritable">Local editing is available. Cloud saving is disabled until the preserved fields have a compatible mapping.</p>
+          <p v-if="projectState.compatibility.issues.length">Compatibility: {{ projectState.compatibility.source }} · schema {{ projectState.compatibility.schemaVersion ?? 'unrecognized' }}</p>
+          <ul v-if="projectState.compatibility.issues.length" data-testid="project-compatibility-issues">
+            <li v-for="(issue, index) in projectState.compatibility.issues" :key="`${issue.path}:${issue.code}:${index}`">
+              <strong>{{ issue.code }}</strong> · {{ redactErrorMessage(issue.path) }}: {{ redactErrorMessage(issue.message) }}
+              <span>{{ issue.preserved ? 'Original preserved' : 'See issue details' }}</span>
+            </li>
+          </ul>
+          <button v-if="projectState.originalAvailable" type="button" :disabled="projectActionBusy" data-action="project.exportOriginal" data-source="current"
+            @click="executeProjectAction(AGENT_ACTIONS.projectExportOriginal, {}, 'Original input download started')">Download original</button>
+          <section v-if="projectState.review" class="project-review" aria-label="Cloud project awaiting review">
+            <h3>Cloud project awaiting review</h3>
+            <p><strong>{{ redactErrorMessage(projectState.review.name) }}</strong> · schema {{ projectState.review.compatibility.schemaVersion ?? 'unrecognized' }}</p>
+            <p>The cloud input was retained for review. Your current project remains active.</p>
+            <ul>
+              <li v-for="(issue, index) in projectState.review.compatibility.issues" :key="`${issue.path}:${issue.code}:${index}`">
+                <strong>{{ issue.code }}</strong> · {{ redactErrorMessage(issue.path) }}: {{ redactErrorMessage(issue.message) }}
+                <span>{{ issue.preserved ? 'Original preserved' : 'See issue details' }}</span>
+              </li>
+            </ul>
+            <button v-if="projectState.review.originalAvailable" type="button" :disabled="projectActionBusy" data-action="project.exportOriginal" data-source="review"
+              @click="executeProjectAction(AGENT_ACTIONS.projectExportOriginal, { source: 'review' }, 'Reviewed original download started')">Download reviewed original</button>
+          </section>
+        </template>
+        <p v-if="phase1B.projectContextError" data-testid="project-context-error" role="alert">{{ redactErrorMessage(phase1B.projectContextError) }}</p>
+        <p v-if="projectActionError" data-testid="project-action-error" role="alert">{{ projectActionError }}</p>
+      </details>
 
       <aside class="sidebar">
         <div class="sidebar-tabs" role="tablist" aria-label="Data views">
@@ -1475,7 +1911,7 @@ onBeforeUnmount(() => {
         </label>
 
         <div class="sidebar-actions">
-          <button type="button" data-action="upload.open" @click="openUploadWizard">
+          <button type="button" :disabled="projectReadOnly" data-action="upload.open" @click="showUploadWizard">
             <b>↥</b><span>Upload to Layer</span>
           </button>
           <button type="button" data-action="ui.layerStyle.open" @click="showLayerStyle()">
@@ -1484,30 +1920,179 @@ onBeforeUnmount(() => {
         </div>
 
         <section v-show="activeSidebarTab === 'layers'" class="layer-list" aria-label="Layers">
-          <template v-for="group in visibleLayerGroups" :key="group.id">
+          <form class="layer-group-add" aria-label="Add layer group" @submit.prevent="addLayerGroup">
+            <label>
+              <span>Group name</span>
+              <input v-model="newGroupName" aria-label="New group name" autocomplete="off" :disabled="projectReadOnly || groupActionBusy" />
+            </label>
+            <label>
+              <span>Parent</span>
+              <select v-model="newGroupParent" aria-label="New group parent" :disabled="projectReadOnly || groupActionBusy">
+                <option value="">Root</option>
+                <option v-for="parent in orderedLayerGroups" :key="parent.id" :value="String(parent.id)">
+                  {{ "— ".repeat(groupDepth(parent.id)) + parent.name }}
+                </option>
+              </select>
+            </label>
+            <button type="submit" data-action="layer.group.add" :disabled="projectReadOnly || groupActionBusy || !newGroupName.trim()">Add group</button>
+          </form>
+          <p v-if="groupActionError" class="layer-group-error" role="alert">{{ groupActionError }}</p>
+          <form class="point-layer-add" aria-label="Add point layer" @submit.prevent="addPointLayer">
+            <label>
+              <span>Source</span>
+              <select aria-label="Point layer source" :value="pointFixtureSourceRef" :disabled="projectReadOnly || pointLayerActionBusy">
+                <option :value="pointFixtureSourceRef">Synthetic point sample</option>
+              </select>
+            </label>
+            <small>Present-day points · explicit synthetic sample</small>
+            <label>
+              <span>Name</span>
+              <input v-model="newPointLayerName" aria-label="Point layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" />
+            </label>
+            <label>
+              <span>Group</span>
+              <select v-model="newPointLayerGroup" aria-label="Point layer group" :disabled="projectReadOnly || pointLayerActionBusy">
+                <option value="" disabled>Choose a group</option>
+                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
+                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
+                </option>
+              </select>
+            </label>
+            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newPointLayerName.trim() || !groupsById.has(Number(newPointLayerGroup))">Add point layer</button>
+            <small v-if="layerGroups.length === 0">Create a group before adding a point layer.</small>
+          </form>
+          <form class="point-layer-add line-layer-add" aria-label="Add line layer" @submit.prevent="addLineLayer">
+            <label>
+              <span>Source</span>
+              <select aria-label="Line layer source" :value="lineFixtureSourceRef" :disabled="projectReadOnly || pointLayerActionBusy">
+                <option :value="lineFixtureSourceRef">Synthetic line sample</option>
+              </select>
+            </label>
+            <small>Source-coordinate lines · not reconstructed · explicit synthetic sample</small>
+            <label>
+              <span>Name</span>
+              <input v-model="newLineLayerName" aria-label="Line layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" />
+            </label>
+            <label>
+              <span>Group</span>
+              <select v-model="newLineLayerGroup" aria-label="Line layer group" :disabled="projectReadOnly || pointLayerActionBusy">
+                <option value="" disabled>Choose a group</option>
+                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
+                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
+                </option>
+              </select>
+            </label>
+            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newLineLayerName.trim() || !groupsById.has(Number(newLineLayerGroup))">Add line layer</button>
+            <small v-if="layerGroups.length === 0">Create a group before adding a line layer.</small>
+          </form>
+          <form class="point-layer-add polygon-layer-add" aria-label="Add polygon layer" @submit.prevent="addPolygonLayer">
+            <label>
+              <span>Source</span>
+              <select aria-label="Polygon layer source" :value="polygonFixtureSourceRef" :disabled="projectReadOnly || pointLayerActionBusy">
+                <option :value="polygonFixtureSourceRef">Synthetic polygon sample</option>
+              </select>
+            </label>
+            <small>Source-coordinate polygons · not reconstructed · explicit synthetic sample</small>
+            <label>
+              <span>Name</span>
+              <input v-model="newPolygonLayerName" aria-label="Polygon layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" />
+            </label>
+            <label>
+              <span>Group</span>
+              <select v-model="newPolygonLayerGroup" aria-label="Polygon layer group" :disabled="projectReadOnly || pointLayerActionBusy">
+                <option value="" disabled>Choose a group</option>
+                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
+                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
+                </option>
+              </select>
+            </label>
+            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newPolygonLayerName.trim() || !groupsById.has(Number(newPolygonLayerGroup))">Add polygon layer</button>
+            <small v-if="layerGroups.length === 0">Create a group before adding a polygon layer.</small>
+          </form>
+          <form class="point-layer-add raster-layer-add" aria-label="Add raster layer" @submit.prevent="addRasterLayer">
+            <label>
+              <span>Source</span>
+              <select aria-label="Raster layer source" :value="rasterManifestSourceRef" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add">
+                <option :value="rasterManifestSourceRef">Single raster manifest</option>
+              </select>
+            </label>
+            <label>
+              <span>Raster</span>
+              <select v-model="newRasterLayerSelection" aria-label="Raster layer selection" :disabled="projectReadOnly || pointLayerActionBusy || rasterOptions.length === 0" data-action="layer.add">
+                <option value="" disabled>Choose a raster</option>
+                <option v-for="option in rasterOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
+              </select>
+            </label>
+            <small v-if="rasterOptions.length === 0">No raster manifest choices are available.</small>
+            <label>
+              <span>Name</span>
+              <input v-model="newRasterLayerName" aria-label="Raster layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add" />
+            </label>
+            <label>
+              <span>Group</span>
+              <select v-model="newRasterLayerGroup" aria-label="Raster layer group" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add">
+                <option value="" disabled>Choose a group</option>
+                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
+                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
+                </option>
+              </select>
+            </label>
+            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newRasterLayerName.trim() || !groupsById.has(Number(newRasterLayerGroup)) || !availableRasterIds.has(newRasterLayerSelection)">Add raster layer</button>
+            <small v-if="layerGroups.length === 0">Create a group before adding a raster layer.</small>
+          </form>
+          <form class="point-layer-add atlas-layer-add" aria-label="Add Atlas layer" @submit.prevent="addAtlasLayer">
+            <p>Source: <span aria-label="Atlas layer source">{{ atlasSourceAvailable ? atlasSource?.label : "Atlas manifest unavailable" }}</span></p>
+            <small>Follows the view's committed age; the nearest available frame is used.</small>
+            <label>
+              <span>Name</span>
+              <input v-model="newAtlasLayerName" aria-label="Atlas layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add" />
+            </label>
+            <label>
+              <span>Group</span>
+              <select v-model="newAtlasLayerGroup" aria-label="Atlas layer group" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add">
+                <option value="" disabled>Choose a group</option>
+                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
+                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
+                </option>
+              </select>
+            </label>
+            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newAtlasLayerName.trim() || !groupsById.has(Number(newAtlasLayerGroup)) || !atlasSourceAvailable">Add Atlas layer</button>
+            <small v-if="layerGroups.length === 0">Create a group before adding an Atlas layer.</small>
+          </form>
+          <p v-if="pointLayerActionMessage" class="point-layer-action-message" role="status">{{ pointLayerActionMessage }}</p>
+          <p v-if="pointLayerActionError" class="point-layer-action-error" role="alert">{{ pointLayerActionError }}</p>
+          <!-- One key space preserves main.ts native bindings when a layer changes groups. -->
+          <template v-for="{ key, group, layer } in layerTreeRows" :key="key">
+            <template v-if="!layer">
             <div
+              v-show="visibleGroupIds.has(group.id)"
               class="layer-group-row"
               :class="{ 'is-drop-target': dropTargetLayerId === -group.id }"
               :data-group-id="group.id"
+              :data-depth="groupDepth(group.id)"
+              :style="{ marginLeft: `${groupDepth(group.id) * 12}px` }"
               @dragenter.prevent="dropTargetLayerId = -group.id"
               @dragover.prevent
               @drop.prevent="dropLayerIntoGroup(group.id)"
             >
               <button
                 type="button"
-                :aria-label="`${group.collapsed ? 'Expand' : 'Collapse'} ${group.name}`"
+                :aria-label="`${group.collapsed && !layerQuery ? 'Expand' : 'Collapse'} ${group.name}`"
+                :aria-expanded="!group.collapsed || Boolean(layerQuery)"
+                :disabled="projectReadOnly || (Boolean(layerQuery))"
+                :title="layerQuery ? 'Clear the search to change group collapse' : undefined"
                 data-action="layer.group.setCollapsed"
                 @click="toggleGroup(group)"
-              >{{ group.collapsed ? "›" : "⌄" }}</button>
+              >{{ group.collapsed && !layerQuery ? "›" : "⌄" }}</button>
               <input
                 type="checkbox"
                 :checked="group.active"
                 :aria-label="`${group.name} visibility`"
-                data-action="layer.group.setVisibility"
+                :disabled="projectReadOnly" data-action="layer.group.setVisibility"
                 @change="changeGroupVisibility(group, $event)"
               />
               <strong>{{ group.name }}</strong>
-              <small>{{ layersForGroup(group.id).length }}</small>
+              <small>{{ matchingLayerCount(group.id) }}</small>
               <input
                 class="layer-group-opacity"
                 type="range"
@@ -1516,26 +2101,58 @@ onBeforeUnmount(() => {
                 step="1"
                 :value="Math.round(group.alpha * 100)"
                 :aria-label="`${group.name} opacity`"
-                data-action="layer.group.setOpacity"
+                :disabled="projectReadOnly" data-action="layer.group.setOpacity"
                 @input="changeGroupOpacity(group, $event)"
               />
               <output>{{ Math.round(group.alpha * 100) }}%</output>
             </div>
+            <div
+              v-show="visibleGroupIds.has(group.id)"
+              class="layer-group-controls"
+              :data-group-controls="group.id"
+              :style="{ marginLeft: `${groupDepth(group.id) * 12}px` }"
+            >
+              <label>
+                <span>Parent</span>
+                <select
+                  :aria-label="`Move ${group.name} to group`"
+                  :value="String(group.parentId ?? '')"
+                  :disabled="projectReadOnly || groupActionBusy"
+                  data-action="layer.group.move"
+                  @change="moveLayerGroup(group.id, $event)"
+                >
+                  <option value="">Root</option>
+                  <option v-for="parent in groupParentOptions(group.id)" :key="parent.id" :value="String(parent.id)">
+                    {{ "— ".repeat(groupDepth(parent.id)) + parent.name }}
+                  </option>
+                </select>
+              </label>
+              <button
+                type="button"
+                :aria-label="`Delete ${group.name} group`"
+                :aria-describedby="groupIsNonempty(group.id) ? `group-remove-reason-${group.id}` : undefined"
+                :disabled="projectReadOnly || groupActionBusy || groupIsNonempty(group.id)"
+                data-action="layer.group.remove"
+                @click="executeGroupAction(AGENT_ACTIONS.layerGroupRemove, { groupId: group.id })"
+              >Delete</button>
+              <small v-if="groupIsNonempty(group.id)" :id="`group-remove-reason-${group.id}`">Contains layers or child groups</small>
+            </div>
+            </template>
           <article
-            v-for="layer in layersForGroup(group.id)"
-            :key="layer.id"
-            v-show="!group.collapsed || Boolean(layerSearch)"
+            v-else
+            v-show="layerIsVisible(layer)"
             class="layer-row"
+            :style="{ marginLeft: `${groupDepth(group.id) * 12}px` }"
             :class="{
               'is-selected': selectedLayerId === layer.id,
               'is-dragging': draggedLayerId === layer.id,
               'is-drop-target': dropTargetLayerId === layer.id,
               'has-options': selectedLayerId === layer.id,
             }"
-            :draggable="!layerSearch"
+            :draggable="!projectReadOnly && !layerSearch"
             :data-layer-id="layer.id"
             data-action="ui.layerStyle.open"
-            @click="selectedLayerId = layer.id"
+            @click="showLayerStyle(layer.id)"
             @dragstart="beginLayerDrag($event, layer.id)"
             @dragenter.prevent="dropTargetLayerId = layer.id"
             @dragover.prevent
@@ -1547,18 +2164,19 @@ onBeforeUnmount(() => {
               type="checkbox"
               :checked="layer.active"
               :aria-label="`${layer.name} visibility`"
-              data-action="layer.setVisibility"
+              :disabled="projectReadOnly" data-action="layer.setVisibility"
               @click.stop
               @change="changeLayerVisibility(layer, $event)"
             />
             <span
               class="layer-swatch"
-              :class="layerSwatchClass(layer.id)"
+              :class="layerSwatchClass(layer)"
               aria-hidden="true"
             ></span>
             <span class="layer-copy">
               <strong>{{ layer.name }}</strong>
-              <small v-if="layer.id === RUNTIME_LAYER_IDS.atlas">
+              <small v-if="!isSupportedLayerType(layer)" class="unsupported-layer-status">Unsupported layer type {{ layer.type }} · preserved for compatibility review</small>
+              <small v-else-if="layer.id === RUNTIME_LAYER_IDS.atlas">
                 <span id="atlas-frame-value">—</span> ·
                 <span id="atlas-status">Loading atlas…</span>
               </small>
@@ -1567,6 +2185,32 @@ onBeforeUnmount(() => {
               </small>
               <small v-else-if="layer.id === RUNTIME_LAYER_IDS.raster">
                 <span id="single-raster-state">Preparing</span>
+              </small>
+              <small v-else-if="layer.type === ProjectLayerType.Point" class="ordinary-point-status">
+                Present-day points · {{ layer.runtimeStatus ?? "Status unavailable" }}
+                <span v-if="layer.runtimeError" class="ordinary-point-error" role="alert">{{ redactErrorMessage(layer.runtimeError) }}</span>
+              </small>
+              <small v-else-if="isOrdinaryLineLayer(layer)" class="ordinary-line-status">
+                Source-coordinate lines · not reconstructed · {{ layer.runtimeStatus ?? "Status unavailable" }}
+                <span v-if="layer.runtimeError" class="ordinary-point-error" role="alert">{{ redactErrorMessage(layer.runtimeError) }}</span>
+              </small>
+              <small v-else-if="isOrdinaryPolygonLayer(layer)" class="ordinary-polygon-status">
+                Source-coordinate polygons · not reconstructed · {{ layer.runtimeStatus ?? "Status unavailable" }}
+                <span v-if="layer.runtimeError" class="ordinary-point-error" role="alert">{{ redactErrorMessage(layer.runtimeError) }}</span>
+              </small>
+              <small v-else-if="isOrdinaryRasterLayer(layer)" class="ordinary-raster-status">
+                Raster imagery · {{ layer.runtimeStatus ?? "Status unavailable" }}
+                <span v-if="layer.runtimeError" class="ordinary-point-error" role="alert">{{ redactErrorMessage(layer.runtimeError) }}</span>
+              </small>
+              <small v-else-if="isOrdinaryAtlasLayer(layer)" class="ordinary-atlas-status">
+                Atlas imagery · {{ layer.runtimeStatus === "removing" || layer.runtimeStatus === "error" ? layer.runtimeStatus : layer.atlasState?.status ?? layer.runtimeStatus ?? "Status unavailable" }}
+                <template v-if="layer.atlasState">
+                  <span class="atlas-requested-age"> · Requested: {{ layer.atlasState.requestedAgeMa }} Ma</span>
+                  <span v-if="layer.atlasState.status === 'hidden'" class="atlas-hidden-reason"> · {{ layer.atlasState.reason }}</span>
+                  <span v-if="layer.atlasState.frame" class="atlas-target-frame"> · Target frame: {{ layer.atlasState.frame.timeMa }} Ma ({{ layer.atlasState.frame.label }})</span>
+                  <span class="atlas-committed-frame"> · Last committed frame: {{ layer.atlasState.committedFrame ? `${layer.atlasState.committedFrame.timeMa} Ma (${layer.atlasState.committedFrame.label})` : "none" }}</span>
+                </template>
+                <span v-if="layer.runtimeError" class="ordinary-point-error" role="alert">{{ redactErrorMessage(layer.runtimeError) }}</span>
               </small>
               <small v-else>PALEOMAP finite rotations</small>
             </span>
@@ -1595,18 +2239,48 @@ onBeforeUnmount(() => {
                 ×
               </button>
             </span>
+            <span v-else-if="isOrdinaryPointLayer(layer) || isOrdinaryLineLayer(layer) || isOrdinaryPolygonLayer(layer) || isOrdinaryRasterLayer(layer) || isOrdinaryAtlasLayer(layer)" class="layer-inline-actions">
+              <button
+                type="button"
+                :aria-label="`${layer.name} options`"
+                data-action="ui.layerStyle.open"
+                @click.stop="toggleLayerStyle(layer.id)"
+              >•••</button>
+              <button
+                type="button"
+                :aria-label="`Remove ${layer.name} layer`"
+                :disabled="projectReadOnly || pointLayerActionBusy || layer.runtimeStatus === 'removing'"
+                data-action="layer.remove"
+                @click.stop="removePointLayer(layer)"
+              >×</button>
+            </span>
             <button
               v-else
               type="button"
               :aria-label="`${layer.name} options`"
               data-action="ui.layerStyle.open"
-              @click.stop="selectedLayerId = selectedLayerId === layer.id ? undefined : layer.id"
+              @click.stop="toggleLayerStyle(layer.id)"
             >•••</button>
+            <button
+              v-if="canRetryLayer(layer)"
+              type="button"
+              class="layer-retry"
+              :aria-label="`Retry ${layer.name} layer`"
+              :disabled="projectReadOnly || pointLayerActionBusy"
+              data-action="layer.retry"
+              @click.stop="retryLayer(layer)"
+            >Retry {{ layer.name }} layer</button>
             <div
               v-show="selectedLayerId === layer.id"
               class="layer-style-inline"
               @click.stop
             >
+              <button
+                type="button"
+                aria-label="Close layer style"
+                data-action="ui.layerStyle.close"
+                @click.stop="closeLayerStyle"
+              >×</button>
               <span>Opacity</span>
               <input
                 type="range"
@@ -1615,10 +2289,89 @@ onBeforeUnmount(() => {
                 step="1"
                 :value="Math.round(layer.alpha * 100)"
                 :aria-label="`${layer.name} opacity`"
-                data-action="layer.setOpacity"
+                :disabled="projectReadOnly" data-action="layer.setOpacity"
                 @input="changeLayerOpacity(layer, $event)"
               />
               <output>{{ Math.round(layer.alpha * 100) }}%</output>
+              <div v-if="isOrdinaryRasterLayer(layer)" class="ordinary-point-style-controls ordinary-raster-controls">
+                <label>
+                  <span>Raster</span>
+                  <select :aria-label="`${layer.name} raster source`" :value="selectedRasterId(layer)"
+                    :disabled="projectReadOnly || pointLayerActionBusy || layer.runtimeStatus === 'removing' || rasterOptions.length === 0"
+                    data-action="raster.select" @change="changeRasterSelection(layer, $event)">
+                    <option v-if="!availableRasterIds.has(selectedRasterId(layer))" :value="selectedRasterId(layer)" disabled>Unavailable raster selection</option>
+                    <option v-for="option in rasterOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
+                  </select>
+                </label>
+                <p v-if="rasterSelectionError(layer)" class="ordinary-point-style-error ordinary-raster-error" role="alert">{{ rasterSelectionError(layer) }}</p>
+              </div>
+              <div v-if="isOrdinaryPointLayer(layer)" class="ordinary-point-style-controls">
+                <template v-if="nativePointStyles.get(layer.id)?.style">
+                  <label>
+                    <span>Color</span>
+                    <input type="color" :aria-label="`${layer.name} point color`"
+                      :value="nativePointStyles.get(layer.id)?.style?.singleColor"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-point-style="color"
+                      @change="changeNativePointStyle(layer, 'singleColor', $event)" />
+                  </label>
+                  <label>
+                    <span>Size (px)</span>
+                    <input type="number" :aria-label="`${layer.name} point size`" step="0.1"
+                      :min="POINT_SIZE_MIN_PIXELS" :max="POINT_SIZE_MAX_PIXELS"
+                      :value="nativePointStyles.get(layer.id)?.style?.pointSize"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-point-style="size"
+                      @change="changeNativePointStyle(layer, 'pointSize', $event)" />
+                  </label>
+                </template>
+                <p v-else class="ordinary-point-style-error" role="alert">{{ nativePointStyles.get(layer.id)?.error }}</p>
+              </div>
+              <div v-if="isOrdinaryLineLayer(layer)" class="ordinary-point-style-controls ordinary-line-style-controls">
+                <template v-if="nativeLineStyles.get(layer.id)?.style">
+                  <label>
+                    <span>Line color</span>
+                    <input type="color" :aria-label="`${layer.name} line color`"
+                      :value="nativeLineStyles.get(layer.id)?.style?.lineColor"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-line-style="color"
+                      @change="changeNativeLineStyle(layer, 'lineColor', $event)" />
+                  </label>
+                  <label>
+                    <span>Width (px)</span>
+                    <input type="number" :aria-label="`${layer.name} line width`" step="0.1"
+                      :min="NATIVE_LINE_WIDTH_MIN" :max="NATIVE_LINE_WIDTH_MAX"
+                      :value="nativeLineStyles.get(layer.id)?.style?.lineWidth"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-line-style="width"
+                      @change="changeNativeLineStyle(layer, 'lineWidth', $event)" />
+                  </label>
+                </template>
+                <p v-else class="ordinary-point-style-error ordinary-line-style-error" role="alert">{{ nativeLineStyles.get(layer.id)?.error }}</p>
+              </div>
+              <div v-if="isOrdinaryPolygonLayer(layer)" class="ordinary-point-style-controls ordinary-polygon-style-controls">
+                <template v-if="nativePolygonStyles.get(layer.id)?.style">
+                  <label>
+                    <span>Fill color</span>
+                    <input type="color" :aria-label="`${layer.name} fill color`"
+                      :value="nativePolygonStyles.get(layer.id)?.style?.fillColor"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-polygon-style="fill"
+                      @change="changeNativePolygonStyle(layer, 'fillColor', $event)" />
+                  </label>
+                  <label>
+                    <span>Outline color</span>
+                    <input type="color" :aria-label="`${layer.name} outline color`"
+                      :value="nativePolygonStyles.get(layer.id)?.style?.outlineColor"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-polygon-style="outline"
+                      @change="changeNativePolygonStyle(layer, 'outlineColor', $event)" />
+                  </label>
+                  <label>
+                    <span>Outline width (px)</span>
+                    <input type="number" :aria-label="`${layer.name} outline width`" step="0.1"
+                      :min="NATIVE_POLYGON_OUTLINE_WIDTH_MIN" :max="NATIVE_POLYGON_OUTLINE_WIDTH_MAX"
+                      :value="nativePolygonStyles.get(layer.id)?.style?.outlineWidth"
+                      :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.setStyle" data-native-polygon-style="width"
+                      @change="changeNativePolygonStyle(layer, 'outlineWidth', $event)" />
+                  </label>
+                </template>
+                <p v-else class="ordinary-point-style-error ordinary-polygon-style-error" role="alert">{{ nativePolygonStyles.get(layer.id)?.error }}</p>
+              </div>
               <div
                 v-if="layer.id === RUNTIME_LAYER_IDS.points"
                 class="point-performance-lab"
@@ -1652,7 +2405,7 @@ onBeforeUnmount(() => {
                   <span>Color</span>
                   <select
                     :value="layer.pointStyle.colorMode"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @change="changePointStyleField(layer, 'colorMode', $event)"
                   >
                     <option value="plate">Plate ID</option>
@@ -1665,7 +2418,7 @@ onBeforeUnmount(() => {
                   <input
                     type="color"
                     :value="layer.pointStyle.singleColor"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @input="changePointStyleField(layer, 'singleColor', $event)"
                   />
                 </label>
@@ -1673,7 +2426,7 @@ onBeforeUnmount(() => {
                   <span>Size</span>
                   <select
                     :value="layer.pointStyle.sizeMode"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @change="changePointStyleField(layer, 'sizeMode', $event)"
                   >
                     <option value="fixed">Fixed</option>
@@ -1688,7 +2441,7 @@ onBeforeUnmount(() => {
                     max="8"
                     step="0.1"
                     :value="layer.pointStyle.pointSize"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @input="changePointStyleField(layer, 'pointSize', $event)"
                   />
                 </label>
@@ -1696,7 +2449,7 @@ onBeforeUnmount(() => {
                   <span>Shape</span>
                   <select
                     :value="layer.pointStyle.shape"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @change="changePointStyleField(layer, 'shape', $event)"
                   >
                     <option value="circle">Circle</option>
@@ -1711,7 +2464,7 @@ onBeforeUnmount(() => {
                     max="65535"
                     placeholder="All"
                     :value="layer.pointStyle.filter.plateId ?? ''"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @input="changePointFilter(layer, 'plateId', $event)"
                   />
                 </label>
@@ -1722,7 +2475,7 @@ onBeforeUnmount(() => {
                     min="0"
                     max="65535"
                     :value="layer.pointStyle.filter.minimumOccurrence"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @input="changePointFilter(layer, 'minimumOccurrence', $event)"
                   />
                 </label>
@@ -1733,7 +2486,7 @@ onBeforeUnmount(() => {
                     min="0"
                     max="65535"
                     :value="layer.pointStyle.filter.maximumOccurrence"
-                    data-action="points.setStyle"
+                    :disabled="projectReadOnly" data-action="points.setStyle"
                     @input="changePointFilter(layer, 'maximumOccurrence', $event)"
                   />
                 </label>
@@ -1741,7 +2494,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
           </template>
-          <p v-if="filteredLayerRows.length === 0" class="layer-empty">
+          <p v-if="filteredLayerRows.length === 0 && visibleGroupIds.size === 0" class="layer-empty">
             No matching layers
           </p>
         </section>
@@ -1805,7 +2558,7 @@ onBeforeUnmount(() => {
             </span>
             <button
               type="button"
-              data-action="model.select"
+              :disabled="projectReadOnly" data-action="model.select"
               @click="selectSharedPlateModel(foreignKeyValue(item.ID))"
             >Use</button>
           </article>
@@ -1824,7 +2577,7 @@ onBeforeUnmount(() => {
             </span>
             <button
               type="button"
-              :disabled="phase1B.selection.useLocalPlateModelDemo"
+              :disabled="projectReadOnly || (phase1B.selection.useLocalPlateModelDemo)"
               data-action="model.select"
               @click="selectLocalPlateModelDemo"
             >Use</button>
@@ -1865,7 +2618,7 @@ onBeforeUnmount(() => {
               </span>
               <button
                 type="button"
-                data-action="model.select"
+                :disabled="projectReadOnly" data-action="model.select"
                 @click="selectPlateModel(foreignKeyValue(item.Version.ID))"
               >Use</button>
             </article>
@@ -1886,7 +2639,7 @@ onBeforeUnmount(() => {
               </span>
               <button
                 type="button"
-                data-action="dataset.select"
+                :disabled="projectReadOnly" data-action="dataset.select"
                 @click="selectDataset(foreignKeyValue(item.Version.ID))"
               >Use</button>
             </article>
@@ -1918,7 +2671,7 @@ onBeforeUnmount(() => {
                 </span>
                 <button
                   type="button"
-                  data-action="model.select"
+                  :disabled="projectReadOnly" data-action="model.select"
                   @click="selectPlateModel(foreignKeyValue(item.Version.ID))"
                 >Use</button>
               </article>
@@ -1939,7 +2692,7 @@ onBeforeUnmount(() => {
                 </span>
                 <button
                   type="button"
-                  data-action="dataset.select"
+                  :disabled="projectReadOnly" data-action="dataset.select"
                   @click="selectDataset(foreignKeyValue(item.Version.ID))"
                 >Use</button>
               </article>
@@ -1960,7 +2713,7 @@ onBeforeUnmount(() => {
               </span>
               <button
                 type="button"
-                data-action="project.open"
+                :disabled="projectReadOnly" data-action="project.open"
                 @click="openCloudProject(project)"
               >
                 Open
@@ -1981,7 +2734,7 @@ onBeforeUnmount(() => {
             min="0.5"
             max="8"
             step="any"
-            data-action="points.setSize"
+            :disabled="projectReadOnly" data-action="points.setSize"
           />
           <span id="point-size-value">2.2 px</span>
 
@@ -2010,7 +2763,7 @@ onBeforeUnmount(() => {
         </div>
       </aside>
 
-      <main class="workspace" aria-label="3D globe workspace">
+      <main class="workspace" aria-label="3D globe workspace" data-action="feature.select">
         <div id="cesium-container"></div>
         <div class="canvas-vignette" aria-hidden="true"></div>
 
@@ -2063,7 +2816,7 @@ onBeforeUnmount(() => {
             <select id="projection-select" data-action="projection.select" disabled>
               <option value="globe">Globe (3D)</option>
               <option value="rectangle">Rectangle</option>
-              <option value="mollweide" disabled>Mollweide</option>
+              <option value="mollweide">Mollweide</option>
             </select>
           </label>
           <p id="projection-status" class="projection-status" aria-live="polite"></p>
@@ -2089,7 +2842,7 @@ onBeforeUnmount(() => {
                 type="button"
                 data-age="100"
                 aria-label="Jump to 100 Ma"
-                data-action="time.set"
+                :disabled="projectReadOnly" data-action="time.set"
               >
                 ◀
               </button>
@@ -2097,7 +2850,7 @@ onBeforeUnmount(() => {
               id="play-button"
               type="button"
               aria-label="Play geological time"
-              data-action="time.setPlaying"
+              :disabled="projectReadOnly" data-action="time.setPlaying"
             >
                 <span class="play-icon" aria-hidden="true"></span>
                 <span data-play-label>Play</span>
@@ -2106,7 +2859,7 @@ onBeforeUnmount(() => {
                 type="button"
                 data-age="0"
                 aria-label="Jump to present"
-                data-action="time.set"
+                :disabled="projectReadOnly" data-action="time.set"
               >
                 ▶
               </button>
@@ -2115,7 +2868,7 @@ onBeforeUnmount(() => {
             id="speed-button"
             class="mini-button"
             type="button"
-            data-action="time.setSpeed"
+            :disabled="projectReadOnly" data-action="time.setSpeed"
           >
             25 Ma/s
           </button>
@@ -2123,7 +2876,7 @@ onBeforeUnmount(() => {
             id="today-button"
             class="mini-button"
             type="button"
-            data-action="time.set"
+            :disabled="projectReadOnly" data-action="time.set"
           >
             0
           </button>
@@ -2135,13 +2888,14 @@ onBeforeUnmount(() => {
         </section>
 
         <aside id="plate-inspector" class="plate-inspector">
-          <div id="inspector-empty">Click a plate to inspect</div>
+          <div id="inspector-empty">Click a feature to inspect</div>
           <div id="inspector-content" hidden>
             <strong id="selected-name">Plate</strong>
             <span id="selected-id">ID —</span>
             <span id="selected-validity">—</span>
             <span id="selected-state">—</span>
             <span id="selected-quaternion">—</span>
+            <button id="clear-feature-selection" type="button" data-action="feature.clear">Clear selection</button>
           </div>
         </aside>
 
@@ -2153,7 +2907,7 @@ onBeforeUnmount(() => {
 
       <section class="timeline" aria-label="Geological time scale">
         <div class="timeline__left-rail">
-          <span class="timeline__max">538.8</span>
+          <span class="timeline__max">{{ timelineMaximum }}</span>
           <span class="timeline__rail-knob">↔</span>
         </div>
         <div class="timeline__scale">
@@ -2163,6 +2917,8 @@ onBeforeUnmount(() => {
             class="timeline-row"
             :class="row.className"
           >
+            <span v-if="timelineMaximum > 538.8" class="segment timeline-range-extension"
+              :style="timelineExtensionStyle(row.segments)" :title="`${timelineMaximum}–538.8 Ma`">{{ timelineMaximum }}–538.8 Ma</span>
             <span
               v-for="segment in row.segments"
               :key="`${row.className}-${segment.label}-${segment.weight}`"
@@ -2184,17 +2940,17 @@ onBeforeUnmount(() => {
           class="timeline-slider"
           type="range"
           min="0"
-          max="538.8"
+          :max="timelineMaximum"
           value="0"
           step="0.1"
           aria-label="Geological age in Ma"
-          data-action="time.set"
+          :disabled="projectReadOnly" data-action="time.set"
         />
         <span class="timeline__zero">0.0</span>
         <div class="quick-ages" aria-hidden="true">
-          <button type="button" data-age="32" data-action="time.set">32</button>
-          <button type="button" data-age="250" data-action="time.set">250</button>
-          <button type="button" data-age="538.8" data-action="time.set">538.8</button>
+          <button type="button" data-age="32" :disabled="projectReadOnly" data-action="time.set">32</button>
+          <button type="button" data-age="250" :disabled="projectReadOnly" data-action="time.set">250</button>
+          <button type="button" :data-age="timelineMaximum" :disabled="projectReadOnly" data-action="time.set">{{ timelineMaximum }}</button>
         </div>
       </section>
 
@@ -2364,7 +3120,7 @@ onBeforeUnmount(() => {
               <input
                 type="file"
                 accept=".csv,.tsv,.txt,text/csv"
-                :disabled="uploadBusy"
+                :disabled="projectReadOnly || (uploadBusy)"
                 data-action="upload.run"
                 @change="selectUploadFile"
               />
@@ -2382,7 +3138,7 @@ onBeforeUnmount(() => {
                 v-model.trim="uploadName"
                 type="text"
                 maxlength="128"
-                data-action="upload.run"
+                :disabled="projectReadOnly" data-action="upload.run"
               />
             </label>
             <label>
@@ -2391,12 +3147,12 @@ onBeforeUnmount(() => {
                 v-model.trim="uploadDescription"
                 type="text"
                 maxlength="1024"
-                data-action="upload.run"
+                :disabled="projectReadOnly" data-action="upload.run"
               />
             </label>
             <label>
               <span>Plate model</span>
-              <select v-model.number="uploadPlateModelId" data-action="upload.run">
+              <select v-model.number="uploadPlateModelId" :disabled="projectReadOnly" data-action="upload.run">
                 <option v-if="ingestPlateModels.length === 0" :value="0">No plate model available</option>
                 <option
                   v-for="model in ingestPlateModels"
@@ -2408,42 +3164,42 @@ onBeforeUnmount(() => {
             <div class="upload-mapping">
               <label>
                 <span>Longitude<em aria-hidden="true">*</em></span>
-                <select v-model="uploadMapping.longitudeColumn" data-action="upload.run">
+                <select v-model="uploadMapping.longitudeColumn" :disabled="projectReadOnly" data-action="upload.run">
                   <option value="">Not mapped</option>
                   <option v-for="header in uploadPreview?.headerList ?? []" :key="`lng-${header}`" :value="header">{{ header }}</option>
                 </select>
               </label>
               <label>
                 <span>Latitude<em aria-hidden="true">*</em></span>
-                <select v-model="uploadMapping.latitudeColumn" data-action="upload.run">
+                <select v-model="uploadMapping.latitudeColumn" :disabled="projectReadOnly" data-action="upload.run">
                   <option value="">Not mapped</option>
                   <option v-for="header in uploadPreview?.headerList ?? []" :key="`lat-${header}`" :value="header">{{ header }}</option>
                 </select>
               </label>
               <label>
                 <span>Age start (Ma)</span>
-                <select v-model="uploadMapping.ageStartColumn" data-action="upload.run">
+                <select v-model="uploadMapping.ageStartColumn" :disabled="projectReadOnly" data-action="upload.run">
                   <option value="">Permanent</option>
                   <option v-for="header in uploadPreview?.headerList ?? []" :key="`from-${header}`" :value="header">{{ header }}</option>
                 </select>
               </label>
               <label>
                 <span>Age end (Ma)</span>
-                <select v-model="uploadMapping.ageEndColumn" data-action="upload.run">
+                <select v-model="uploadMapping.ageEndColumn" :disabled="projectReadOnly" data-action="upload.run">
                   <option value="">Permanent</option>
                   <option v-for="header in uploadPreview?.headerList ?? []" :key="`to-${header}`" :value="header">{{ header }}</option>
                 </select>
               </label>
               <label>
                 <span>Occurrence</span>
-                <select v-model="uploadMapping.occurrenceColumn" data-action="upload.run">
+                <select v-model="uploadMapping.occurrenceColumn" :disabled="projectReadOnly" data-action="upload.run">
                   <option value="">None</option>
                   <option v-for="header in uploadPreview?.headerList ?? []" :key="`occ-${header}`" :value="header">{{ header }}</option>
                 </select>
               </label>
               <label>
                 <span>Plate ID</span>
-                <select v-model="uploadMapping.plateIdColumn" data-action="upload.run">
+                <select v-model="uploadMapping.plateIdColumn" :disabled="projectReadOnly" data-action="upload.run">
                   <option value="">Assign from model</option>
                   <option v-for="header in uploadPreview?.headerList ?? []" :key="`plate-${header}`" :value="header">{{ header }}</option>
                 </select>
@@ -2472,14 +3228,14 @@ onBeforeUnmount(() => {
                 type="button"
                 :disabled="uploadBusy"
                 data-action="ui.upload.back"
-                @click="uploadStep = 'select'"
+                @click="showUploadStep('select')"
               >
                 Back
               </button>
               <button
                 class="auth-dialog__submit"
                 type="button"
-                :disabled="uploadBusy || ingestPlateModels.length === 0"
+                :disabled="projectReadOnly || (uploadBusy || ingestPlateModels.length === 0)"
                 data-action="upload.run"
                 @click="startIngest()"
               >Start ingest</button>
@@ -2510,7 +3266,7 @@ onBeforeUnmount(() => {
                 type="button"
                 :disabled="uploadBusy"
                 data-action="ui.upload.back"
-                @click="uploadStep = 'map'"
+                @click="showUploadStep('map')"
               >
                 Back
               </button>
@@ -2523,3 +3279,102 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.project-persistence {
+  position: absolute; top: 48px; right: 12px; z-index: 31;
+  width: min(380px, calc(100% - 278px)); max-height: 44vh; overflow: auto;
+  padding: 8px 10px; border: 1px solid #becbd5; border-radius: 5px;
+  background: #f9fbfd; color: #334854; font-size: 11px; overflow-wrap: anywhere;
+}
+.project-persistence summary { cursor: pointer; }
+.project-persistence summary span { display: block; margin: 2px 0; }
+.project-persistence p { margin: 7px 0; }
+.project-persistence ul { margin: 6px 0; padding-left: 17px; }
+.project-persistence li { margin: 6px 0; }
+.project-persistence li span { display: block; color: #64727d; }
+.project-persistence [role="alert"], .project-readonly-reason { color: #a22b2b; }
+.project-persistence button { padding: 5px 8px; border: 1px solid #becbd5; border-radius: 3px; background: white; cursor: pointer; }
+.project-review { margin-top: 10px; padding-top: 8px; border-top: 1px solid #becbd5; }
+.project-review h3 { margin: 0; font-size: 12px; }
+.topbar button:disabled { opacity: 0.5; cursor: default; }
+.unsupported-layer-status { white-space: normal; overflow-wrap: anywhere; }
+.layer-swatch.unsupported { background: #a22b2b; border-radius: 0; }
+.layer-group-add,
+.layer-group-controls,
+.point-layer-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+  padding: 7px;
+  border-bottom: 1px solid #cdd5dc;
+  background: #f5f7f9;
+  font-size: 10px;
+}
+
+.layer-group-add > label:first-child { grid-column: 1 / -1; }
+.layer-group-add label,
+.layer-group-controls label,
+.point-layer-add label { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.layer-group-add input,
+.layer-group-add select,
+.layer-group-controls select,
+.point-layer-add input,
+.point-layer-add select { flex: 1; min-width: 0; width: 0; }
+.layer-group-add input,
+.layer-group-add select,
+.layer-group-add button,
+.layer-group-controls select,
+.layer-group-controls button,
+.point-layer-add input,
+.point-layer-add select,
+.point-layer-add button {
+  min-height: 26px;
+  border: 1px solid #becbd5;
+  border-radius: 3px;
+  background: white;
+  color: #334854;
+  font: inherit;
+}
+.layer-group-add button,
+.layer-group-controls button,
+.point-layer-add button { padding: 3px 6px; cursor: pointer; }
+.layer-group-add button:disabled,
+.layer-group-controls button:disabled,
+.point-layer-add button:disabled { cursor: default; color: #697782; background: #edf1f4; }
+.layer-group-controls small { grid-column: 1 / -1; color: #64727d; font-size: 9px; }
+.layer-group-error { margin: 0; padding: 8px; color: #a22b2b; font-size: 11px; overflow-wrap: anywhere; }
+.point-layer-add label,
+.point-layer-add small { grid-column: 1 / -1; }
+.point-layer-add button { grid-column: 2; }
+.point-layer-add small { color: #64727d; }
+.atlas-layer-add > p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.layer-copy .ordinary-atlas-status { white-space: normal; overflow-wrap: anywhere; }
+.layer-row > .layer-retry {
+  grid-column: 3 / -1;
+  justify-self: start;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  padding: 4px 6px;
+  border: 1px solid #becbd5;
+  border-radius: 3px;
+  background: white;
+  color: #334854;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.layer-row > .layer-retry:disabled { opacity: 0.5; cursor: default; }
+.point-layer-action-message,
+.point-layer-action-error { margin: 0; padding: 8px; font-size: 11px; overflow-wrap: anywhere; }
+.point-layer-action-error,
+.ordinary-point-error { color: #a22b2b; }
+.ordinary-point-error { display: block; overflow-wrap: anywhere; white-space: normal; }
+.ordinary-point-style-controls { grid-column: 1 / -1; display: grid; gap: 6px; }
+.ordinary-point-style-controls label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.ordinary-point-style-controls input[type="number"] { width: 64px; }
+.ordinary-raster-controls select { flex: 1; min-width: 0; max-width: 100%; }
+.ordinary-point-style-error { margin: 0; color: #a22b2b; overflow-wrap: anywhere; }
+.layer-swatch.lines { height: 3px; border-radius: 0; background: #38bdf8; }
+.layer-swatch.polygons { border-radius: 1px; border: 1px solid #ffffff; background: #38bdf8; }
+</style>

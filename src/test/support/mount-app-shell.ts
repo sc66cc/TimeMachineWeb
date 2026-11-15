@@ -1,6 +1,8 @@
 import { vi } from "vitest";
 
 import { createApp } from "vue";
+import { ProjectSession } from "../../project/project-session";
+import { PROJECT_STATE_EVENT, type ProjectStateDetail } from "../../project/project-events";
 
 /**
  * Mounts the real AppShell in jsdom with an in-page storage stub and a fetch
@@ -12,7 +14,7 @@ import { createApp } from "vue";
  * constructed, so the stub must exist first.
  */
 export async function mountAppShell(
-  options: { fetchErrorMessage?: string } = {},
+  options: { fetchErrorMessage?: string; publishProjectState?: boolean } = {},
 ): Promise<{ unmount: () => void }> {
   ensureStorage("localStorage");
   ensureStorage("sessionStorage");
@@ -32,6 +34,13 @@ export async function mountAppShell(
   app.mount(host);
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
+  if (options.publishProjectState !== false) {
+    const project = new ProjectSession();
+    const detail: ProjectStateDetail = { restoreStatus: "empty", compatibility: project.compatibilityReport,
+      localSave: project.localSaveState, cloudSave: { status: "idle" }, originalAvailable: false };
+    window.dispatchEvent(new CustomEvent(PROJECT_STATE_EVENT, { detail }));
+    await Promise.resolve();
+  }
   return {
     unmount: () => {
       app.unmount();

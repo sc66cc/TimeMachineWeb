@@ -6,6 +6,7 @@ import { basename, resolve } from "node:path";
 
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import vue from "@vitejs/plugin-vue";
+import tailwindcss from "@tailwindcss/vite";
 import cesium from "vite-plugin-cesium";
 
 const pointDataDirectory = resolve("data/generated/points");
@@ -168,13 +169,14 @@ function singleRasterDataPlugin(): Plugin {
 export default defineConfig({
   plugins: [
     vue(),
+    tailwindcss(),
     cesium(),
     pointDataPlugin(),
     atlasDataPlugin(),
     singleRasterDataPlugin(),
   ],
   resolve: {
-    alias: packageAliases,
+    alias: { ...packageAliases, "@": resolve("src") },
   },
   test: {
     include: ["src/**/*.test.ts", "packages/**/*.test.ts"],

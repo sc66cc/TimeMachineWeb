@@ -3,7 +3,9 @@ import {
   Cartesian3,
   Color,
   GeographicProjection,
+  MapMode2D,
   Matrix4,
+  SceneMode,
   Viewer,
 } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
@@ -31,7 +33,6 @@ import {
 import {
 	DEFAULT_POINT_STYLE,
 	GpuPointRenderer,
-	loadPointDataset,
 	MAX_PICKABLE_POINT_COUNT,
 	normalizePointStyleExpression,
 	POINT_SIZE_MAX_PIXELS,
@@ -50,17 +51,26 @@ import {
 	parsePaleoAtlasManifest,
 	parseSingleRasterManifest,
 	SingleRasterLayerController,
+	type PaleoAtlasManifest,
 	type PaleoAtlasRuntimeState,
 	type SingleRasterEntry,
+	type SingleRasterManifest,
 	type SingleRasterRuntimeState,
 } from "@timemachine/raster-runtime";
 import { GeologicalTimeline } from "./ui/geological-timeline";
 import { PerformanceMonitor } from "./ui/performance-monitor";
+import { CameraResetCompletion } from "./projection/camera-reset-completion";
+import { withRpcDiagnostics } from "./diagnostics/rpc-options";
+import { installRuntimeErrorDiagnostics } from "./diagnostics/runtime-errors";
+import { resolveStartupResources } from "./startup/resolve-startup-resources";
+import { confirmStartupView } from "./startup/confirm-startup-view";
+import { attachOptionalLayer } from "./startup/attach-optional-layer";
+import { executeRasterSelection } from "./layers/raster-selection-operation";
+import { prepareAtlasTimeGroup, type AtlasTimeGroup } from "./layers/atlas-time-group";
+import { executeAtlasTime } from "./layers/atlas-time-operation";
+import { requestStartupManifest } from "./startup/request-startup-manifest";
 import { bootstrapTimeMachinePlatform } from "./platform-bootstrap";
-import {
-	phase1BCloudClient,
-	type RuntimeDataUrlOverrides,
-} from "./phase1b/cloud-client";
+import { phase1BCloudClient, CloudProjectSaveError } from "./phase1b/cloud-client";
 import { convertPlateModelContent } from "./plate-model/plate-model-adapter";
 import { SharedPlateModelClient } from "./plate-model/shared-plate-client";
 import {
@@ -79,8 +89,26 @@ import {
 	AgentActionValidationError,
 } from "./agent-actions/registry";
 import type { AgentActionOutcome } from "./agent-actions/types";
+import { OperationInterruptedError } from "./agent-actions/operation";
 import { ProjectSession, RUNTIME_LAYER_IDS } from "./project/project-session";
+import { registerProjectLocalActions } from "./project/project-actions";
+import { PROJECT_STATE_EVENT, type ProjectCloudSaveState, type ProjectStateDetail } from "./project/project-events";
 import { LayerController } from "./layers/layer-controller";
+import { preparePointLayer, disposePointLayer } from "./layers/point-layer-preparation";
+import { waitForPointLayerFrame } from "./layers/point-layer-frame";
+import { registerLayerGroupActions } from "./layers/group-actions";
+import { registerLayerInstanceActions, SINGLE_RASTER_SOURCE, PALEO_ATLAS_SOURCE, type LayerInstanceInput } from "./layers/instance-actions";
+import { loadSyntheticVectorSource } from "./layers/synthetic-point-source";
+import { NativePointLayerRuntime } from "./layers/native-point-layer-runtime";
+import { NATIVE_VECTOR_DISPLAY_OFFSET_METRES } from "./layers/vector-bindings";
+import { registerLayerStyleAction } from "./layers/style-action";
+import { readNativePointStyle } from "./layers/native-point-style";
+import { readNativeLineStyle } from "./layers/native-line-style";
+import { readNativePolygonStyle } from "./layers/native-polygon-style";
+import { FeatureSelection, type SelectionKey } from "./layers/selection";
+import { clearFeatureSelection, registerSelectionActions, selectFeature, type SelectionFeature } from "./layers/selection-actions";
+import { summarizeFeatureAttributes } from "./layers/feature-attributes";
+import { createPointFeatureId, parsePointFeatureId, readPointFeatureAttributes, projectPlateFeatureAttributes } from "./layers/feature-source-records";
 import {
 	applyPointRuntimeState,
 	parsePointSizePixels,
@@ -97,7 +125,7 @@ import {
   type ProjectionSnapshot,
   type ProjectionTimeCounts,
 } from "./projection";
-import { SystemOpenAPIInvoker } from "@timemachine/generated-api";
+import { ProjectLayerType, SystemOpenAPIInvoker } from "@timemachine/generated-api";
 import {
 	LAYER_GROUP_COLLAPSE_CHANGE_EVENT,
 	LAYER_GROUP_OPACITY_CHANGE_EVENT,
@@ -114,6 +142,7 @@ import {
 	type LayerOrderChangeDetail,
 	type LayerVisibilityChangeDetail,
 	type PointStyleChangeDetail,
+	type LayerStateDetail,
 } from "./layers/layer-events";
 
 const DEFAULT_DATA_URLS = {
@@ -151,6 +180,7 @@ function requiredElement<T extends Element>(
  * polluted by it. The projection controller flips this on every mode change.
  */
 let globeSpinInertiaEnabled = true;
+const cancelGlobeMomentum = new WeakMap<Viewer, () => void>();
 
 function formatTimeBoundary(timeMa: number): string {
 	if (timeMa === Number.POSITIVE_INFINITY) {
@@ -206,7 +236,7 @@ function emptyRotationResult(): RotationParseResult {
 	};
 }
 
-function setCameraHome(viewer: Viewer): void {
+function setCameraHome(viewer: Viewer, callbacks?: { complete: () => void; cancel: () => void }): void {
 	const destination = new Cartesian3(
 		-EARTH_RADIUS_METRES * 0.55,
 		-EARTH_RADIUS_METRES * 3.9,
@@ -228,6 +258,7 @@ function setCameraHome(viewer: Viewer): void {
 		destination,
 		orientation: { direction, up },
 		duration: 0.8,
+		...callbacks,
 	});
 }
 
@@ -274,6 +305,13 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 		}
 	};
 
+	cancelGlobeMomentum.set(viewer, () => {
+		stopMomentum();
+		activePointerId = undefined;
+		velocityX = 0;
+		velocityY = 0;
+	});
+
 	const startMomentum = (): void => {
 		stopMomentum();
 		// The custom spin momentum is a globe-only behaviour. In the Rectangle
@@ -300,6 +338,7 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 		beginInteraction();
 		let previousFrameTime = performance.now();
 		const animate = (frameTime: number): void => {
+			if (!globeSpinInertiaEnabled) { stopMomentum(); return; }
 			const elapsedMs = Math.min(34, frameTime - previousFrameTime);
 			previousFrameTime = frameTime;
 			const decay = Math.exp(-elapsedMs / 430);
@@ -323,7 +362,7 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 	const handlePointerDown = (event: PointerEvent): void => {
 		stopMomentum();
 		beginInteraction();
-		if (event.button !== 0 || !event.isPrimary) {
+		if (!globeSpinInertiaEnabled || event.button !== 0 || !event.isPrimary) {
 			return;
 		}
 		activePointerId = event.pointerId;
@@ -381,16 +420,18 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 	window.addEventListener("pointercancel", handlePointerCancel);
 	window.addEventListener(
 		"pagehide",
-		() => {
+		function releaseCameraInteraction(event) {
+			if (event.persisted) return;
+			window.removeEventListener("pagehide", releaseCameraInteraction);
 			window.clearTimeout(settleTimer);
 			stopMomentum();
+			cancelGlobeMomentum.delete(viewer);
 			canvas.removeEventListener("pointerdown", handlePointerDown);
 			canvas.removeEventListener("wheel", handleWheel);
 			window.removeEventListener("pointermove", handlePointerMove);
 			window.removeEventListener("pointerup", handlePointerUp);
 			window.removeEventListener("pointercancel", handlePointerCancel);
 		},
-		{ once: true },
 	);
 }
 
@@ -408,6 +449,7 @@ function createViewer(): Viewer {
 		// Rectangle mode morphs into. It matches the SPHERICAL_EARTH ellipsoid, so
 		// it never affects the 3D globe.
 		mapProjection: new GeographicProjection(SPHERICAL_EARTH),
+		mapMode2D: MapMode2D.ROTATE,
 		navigationHelpButton: false,
 		sceneModePicker: false,
 		selectionIndicator: false,
@@ -457,14 +499,6 @@ async function fetchText(url: string): Promise<string> {
 		throw new Error(`${url} 加载失败（HTTP ${response.status}）`);
 	}
 	return response.text();
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-	const response = await fetch(url);
-	if (!response.ok) {
-		throw new Error(`${url} 加载失败（HTTP ${response.status}）`);
-	}
-	return response.json() as Promise<T>;
 }
 
 function formatBytes(bytes: number | undefined): string {
@@ -517,10 +551,32 @@ async function main(): Promise<void> {
 	// The facade must exist before anything else so an automated caller can read
 	// state and drive actions while the rest of the app is still booting.
 	installAgentActions();
+	const runtimeErrorDiagnostics = installRuntimeErrorDiagnostics(window, agentActions.diagnostics);
+	const stateObserverCleanup: Array<() => void> = [];
+	const registerStateSection = (section: string, provider: () => Record<string, unknown>): void => {
+		stateObserverCleanup.push(agentActions.registerStateSection(section, provider));
+	};
+	const manifestAbort = new AbortController();
+	const manifestStatus: Record<"points" | "atlas" | "raster", "loading" | "ready" | "error"> = {
+		points: "loading", atlas: "loading", raster: "loading",
+	};
+	const reportManifestFailure = (resource: keyof typeof manifestStatus, error: unknown): void => {
+		agentActions.diagnostics.record({
+			level: "warn", category: "asset", event: `startup.${resource}-manifest-failed`, outcome: "failed", error,
+		});
+	};
+	registerStateSection("startupResources", () => ({ manifests: { ...manifestStatus } }));
+	window.addEventListener("pagehide", (event) => {
+		if (event.persisted) return;
+		manifestAbort.abort();
+		runtimeErrorDiagnostics.dispose();
+		stateObserverCleanup.splice(0).forEach(stop => stop());
+		agentActions.disposeStateObservers();
+	});
 	createApp(AppShell).mount("#app");
 	await nextTick();
 
-	const platformBootstrap = bootstrapTimeMachinePlatform().catch((error) => {
+	void bootstrapTimeMachinePlatform().catch((error) => {
 		console.warn("TimeMachine platform capability handshake failed.", error);
 		return undefined;
 	});
@@ -530,30 +586,14 @@ async function main(): Promise<void> {
 			console.warn("TimeMachine Phase 1B initialization failed.", error);
 			return phase1BCloudClient.snapshot;
 		});
-	await phase1BInitialization;
-
-	// Only the V2 manifest overrides are resolved, and only when V2 is actually
-	// available. A missing V2 endpoint is not an error for the shared plate
-	// model path, which never reads these URLs.
-	let runtimeUrlOverrides: RuntimeDataUrlOverrides = {};
-	if (phase1BCloudClient.snapshot.v2WorkspaceAvailable) {
-		try {
-			runtimeUrlOverrides =
-				await phase1BCloudClient.resolveSelectedRuntimeUrls();
-		} catch (error) {
-			console.warn(
-				"Selected versioned resource could not be loaded; using local compatibility data.",
-				error
-		);
-			window.dispatchEvent(
-				new CustomEvent("timemachine:project-save-error", {
-					detail: {
-						message:
-							error instanceof Error ? error.message : String(error),
-					},
-				})
-		);
-		}
+	const startupResources = await resolveStartupResources(phase1BCloudClient, phase1BInitialization);
+	const { runtimeUrlOverrides } = startupResources;
+	if ("runtimeUrlError" in startupResources) {
+		const error = startupResources.runtimeUrlError;
+		console.warn("Selected versioned resource could not be loaded.", error);
+		window.dispatchEvent(new CustomEvent("timemachine:project-save-error", {
+			detail: { message: error instanceof Error ? error.message : String(error) },
+		}));
 	}
 	const DATA_URLS = {
 		...DEFAULT_DATA_URLS,
@@ -681,36 +721,67 @@ async function main(): Promise<void> {
 		HTMLElement,
 	);
 
-	let projectSession: ProjectSession;
-	try {
-		projectSession =
-			ProjectSession.restore(window.localStorage) ?? new ProjectSession();
-	} catch (error) {
-		console.warn("Stored TimeMachine project draft was ignored.", error);
-		projectSession = new ProjectSession();
-	}
-	projectName.value = projectSession.projectName;
-	window.addEventListener("timemachine:cloud-project-open", (event: Event) => {
-		try {
-			const detail = (
-				event as CustomEvent<{
-					document: Parameters<typeof ProjectSession.fromDocument>[0];
-				}>
-			).detail;
-			const openedSession = ProjectSession.fromDocument(detail.document);
-			openedSession.save(window.localStorage);
-			window.location.reload();
-		} catch (error) {
-			window.dispatchEvent(
-				new CustomEvent("timemachine:project-save-error", {
-					detail: {
-						message: error instanceof Error ? error.message : String(error),
-					},
-				})
-		);
-		}
+	const restoredProject = ProjectSession.restoreWithReport(window.localStorage);
+	const restoredSession = restoredProject.status === "empty" ? new ProjectSession() : restoredProject.session;
+	const projectTimeRange = { minAgeMa: 0, maxAgeMa: Math.max(538.8, restoredSession?.timeMa ?? 0) };
+	let captureCurrentProject: (() => void) | undefined;
+	let reviewedProject: { name: string; compatibility: ProjectStateDetail["compatibility"]; original: string } | undefined;
+	let cloudSaveState: ProjectCloudSaveState = { status: restoredSession && !restoredSession.isReadOnly ? "idle" : "readonly" };
+	const readProjectState = (): ProjectStateDetail => {
+		const localSave = restoredSession?.localSaveState ?? { status: "readonly" as const, revision: 0 };
+		return {
+			timeRange: projectTimeRange,
+			restoreStatus: restoredProject.status,
+			compatibility: restoredSession?.compatibilityReport ?? restoredProject.compatibility,
+			localSave,
+			cloudSave: cloudSaveState.status === "saved" && cloudSaveState.revision !== localSave.revision
+				? { ...cloudSaveState, status: "dirty" } : { ...cloudSaveState },
+			originalAvailable: restoredProject.original !== undefined,
+			...(reviewedProject ? { review: { name: reviewedProject.name, compatibility: reviewedProject.compatibility, originalAvailable: true } } : {}),
+		};
+	};
+	const publishProjectState = (): void => {
+		window.dispatchEvent(new CustomEvent(PROJECT_STATE_EVENT, { detail: readProjectState() }));
+		agentActions.notifyStateChanged("project");
+	};
+	registerStateSection("project", () => ({
+		...readProjectState(),
+		schemaVersion: restoredSession?.compatibilityReport.schemaVersion ?? restoredProject.compatibility.schemaVersion,
+		name: restoredSession?.projectName ?? null,
+		currentTimeMa: restoredSession?.timeMa ?? null,
+		groups: restoredSession?.groupList ?? [], layers: restoredSession?.layerList ?? [],
+		camera: restoredSession?.cameraSnapshot ?? null,
+	}));
+	const localProjectActions = registerProjectLocalActions(restoredSession, {
+		storage: window.localStorage,
+		capture: () => {
+			if (!captureCurrentProject) throw new AgentActionBusyError("Wait for the project view to finish initializing before saving.");
+			captureCurrentProject();
+		},
+		publish: publishProjectState,
+		original: restoredProject.original,
+		reviewOriginal: () => reviewedProject?.original,
+		downloadOriginal: original => {
+			const url = URL.createObjectURL(new Blob([original], { type: "text/plain;charset=utf-8" }));
+			const link = document.createElement("a");
+			link.href = url; link.download = "timemachine-original.txt"; link.click();
+			window.setTimeout(() => URL.revokeObjectURL(url), 0);
+		},
 	});
-	const initialAgeMa = Math.min(538.8, projectSession.timeMa);
+	projectName.value = restoredSession?.projectName ?? "Project requires review";
+	publishProjectState();
+	if (!restoredSession || restoredSession.isReadOnly) {
+		projectName.readOnly = true;
+		window.dispatchEvent(new CustomEvent(LAYER_STATE_EVENT, { detail: {
+			groups: restoredSession?.groupList ?? [], layers: restoredSession?.layerList ?? [],
+		} }));
+		loadingOverlay.classList.add("is-complete");
+		agentActions.diagnostics.record({ level: "error", category: "app", event: "project.restore-requires-review", outcome: "failed",
+			errorCode: `PROJECT_${restoredProject.status.toUpperCase()}`, error: new Error("Project compatibility requires review before editing or rendering.") });
+		return;
+	}
+	const projectSession = restoredSession;
+	const initialAgeMa = projectSession.timeMa;
 	atlasVisibility.checked =
 		projectSession.getLayer(RUNTIME_LAYER_IDS.atlas)?.active ?? true;
 	pointVisibility.checked =
@@ -730,12 +801,70 @@ async function main(): Promise<void> {
 		pointSize.value = String(initialPointStyle.pointSize);
 		pointSizeValue.textContent = `${initialPointStyle.pointSize.toFixed(1)} px`;
 	}
+	let nativePointRuntime: NativePointLayerRuntime | undefined;
+	let isLayerRetrying = (_layerId: number): boolean => false;
+	const nativePointSourceErrors = new Map<number, string>();
+	const nativePointSourceLoads = new Map<number, { abort: AbortController; promise: Promise<void> }>();
+	const nativeSelectionOwners = new Map<number, { sourceRef: string }>();
+	let rasterManifest: SingleRasterManifest | undefined;
+	const rasterControllers = new Map<number, SingleRasterLayerController>();
+	const rasterStates = new Map<number, SingleRasterRuntimeState>();
+	const rasterErrors = new Map<number, string>();
+	const rasterLoads = new Map<number, { abort: AbortController; promise: Promise<void> }>();
+	const rasterRemovals = new Map<number, Promise<void>>();
+	const rasterSelectionGenerations = new Map<number, number>();
+	const rasterSelectionOwners = new Map<number, { rasterId: string; generation: number; waiters: number; committed: boolean }>();
+	const rasterRemovalRequested = new Set<number>();
+	const rasterCleanupPending = new Set<number>();
+	let atlasManifest: PaleoAtlasManifest | undefined;
+	const atlasControllers = new Map<number, PaleoAtlasLayerController>();
+	const atlasStates = new Map<number, PaleoAtlasRuntimeState>();
+	const atlasErrors = new Map<number, string>();
+	const atlasLoads = new Map<number, { abort: AbortController; promise: Promise<void> }>();
+	const atlasRemovals = new Map<number, Promise<void>>();
+	const atlasCleanupPending = new Set<number>();
+	const atlasStateSummary = (id: number) => {
+		const state = atlasStates.get(id);
+		if (!state) return undefined;
+		const brief = (frame?: { sourceId: string; timeMa: number; label: string }) => frame
+			? { sourceId: frame.sourceId, timeMa: frame.timeMa, label: frame.label } : null;
+		return { status: atlasErrors.has(id) ? "error" as const : state.status, requestedAgeMa: state.requestedAgeMa,
+			frame: brief("frame" in state ? state.frame : undefined), committedFrame: brief(atlasControllers.get(id)?.getCommittedFrame()),
+			...(state.status === "hidden" ? { reason: state.reason } : {}) };
+	};
+	const instanceRuntimeState = (id: number): Pick<LayerStateDetail["layers"][number], "runtimeStatus" | "runtimeError"> => {
+		if ((Object.values(RUNTIME_LAYER_IDS) as number[]).includes(id) && id !== RUNTIME_LAYER_IDS.raster && id !== RUNTIME_LAYER_IDS.atlas) return {};
+		if (projectSession.getLayer(id)?.type === ProjectLayerType.Atlas) {
+			if (atlasRemovals.has(id)) return { runtimeStatus: "removing" };
+			if (atlasErrors.has(id)) return { runtimeStatus: "error", runtimeError: atlasErrors.get(id)! };
+			if (atlasLoads.has(id)) return { runtimeStatus: "loading" };
+			const state = atlasStates.get(id);
+			return { runtimeStatus: state?.status === "hidden" ? "ready" : state?.status ?? "unloaded",
+				...(state?.status === "error" ? { runtimeError: state.message } : {}) };
+		}
+		if (projectSession.getLayer(id)?.type === ProjectLayerType.Raster) {
+			if (rasterRemovals.has(id)) return { runtimeStatus: "removing" };
+			if (rasterErrors.has(id)) return { runtimeStatus: "error", runtimeError: rasterErrors.get(id)! };
+			if (rasterLoads.has(id)) return { runtimeStatus: "loading" };
+			const state = rasterStates.get(id);
+			return { runtimeStatus: state?.status === "hidden" ? "ready" : state?.status ?? "unloaded",
+				...(state?.status === "error" ? { runtimeError: state.message } : {}) };
+		}
+		const native = nativePointRuntime?.get(id);
+		if (native) return { runtimeStatus: native.runtimeStatus, ...(native.runtimeError ? { runtimeError: native.runtimeError } : {}) };
+		if (nativePointSourceErrors.has(id)) return { runtimeStatus: "error", runtimeError: nativePointSourceErrors.get(id)! };
+		return { runtimeStatus: nativePointSourceLoads.has(id) ? "loading" : "unloaded" };
+	};
 	const applyLayerState = (): void => {
 		window.dispatchEvent(
 			new CustomEvent(LAYER_STATE_EVENT, {
 				detail: {
 					groups: projectSession.groupList,
-					layers: projectSession.layerList,
+					layers: projectSession.layerList.map(layer => ({ ...layer, ...instanceRuntimeState(layer.id),
+						...(layer.type === ProjectLayerType.Atlas ? { atlasState: atlasStateSummary(layer.id) } : {}) })),
+					atlasSource: atlasManifest ? { sourceRef: PALEO_ATLAS_SOURCE, label: atlasManifest.label } : undefined,
+					rasterOptions: rasterManifest?.rasters.map(raster => ({ id: raster.id, label: raster.label })),
+					defaultRasterId: rasterManifest?.defaultRasterId,
 				},
 			}),
 		);
@@ -743,15 +872,15 @@ async function main(): Promise<void> {
 	applyLayerState();
 
 	loadingProgress.style.width = "8%";
-	const pointManifestPromise = fetchJson<PointFixtureManifest>(
-		DATA_URLS.pointManifest,
+	const pointManifestPromise = requestStartupManifest<PointFixtureManifest>(
+		DATA_URLS.pointManifest, manifestAbort.signal,
 	);
-	const atlasManifestPromise = fetchJson<unknown>(DATA_URLS.atlasManifest).then(
-		parsePaleoAtlasManifest,
+	const atlasManifestPromise = requestStartupManifest<unknown>(
+		DATA_URLS.atlasManifest, manifestAbort.signal,
 	);
-	const singleRasterManifestPromise = fetchJson<unknown>(
-		DATA_URLS.singleRasterManifest,
-	).then(parseSingleRasterManifest);
+	const singleRasterManifestPromise = requestStartupManifest<unknown>(
+		DATA_URLS.singleRasterManifest, manifestAbort.signal,
+	);
 
 	// ---------------------------------------------------------------------------
 	// Plate model source.
@@ -762,13 +891,13 @@ async function main(): Promise<void> {
 	// reachable only after the user explicitly picks it in the Plate Model tab.
 	// ---------------------------------------------------------------------------
 	const plateModelStatus = requiredElement("#plate-model-status", HTMLElement);
-	const sharedSelection = phase1BCloudClient.snapshot.selection;
-	const serverUrl = phase1BCloudClient.snapshot.serverUrl;
-	const sharedPlateClient = new SharedPlateModelClient({
+	const sharedSelection = startupResources.selection;
+	const serverUrl = startupResources.serverUrl;
+	const sharedPlateClient = new SharedPlateModelClient(withRpcDiagnostics({
 		baseUrl: serverUrl,
 		getAccessToken: () =>
 			window.sessionStorage.getItem(TIME_MACHINE_ACCESS_TOKEN_KEY),
-	});
+	}));
 
 	const plateModelSource: PlateModelSource =
 		resolvePlateModelSource(sharedSelection);
@@ -888,8 +1017,12 @@ async function main(): Promise<void> {
 	loadingDetail.textContent = "Cesium 正在生成板块网格…";
 	loadingProgress.style.width = "36%";
 	const viewer = createViewer();
+	const startupFrameAbort = new AbortController();
+	runtimeErrorDiagnostics.observeRenderErrors(viewer.scene, "main");
+	const cameraResetCompletion = new CameraResetCompletion(viewer);
 	const restoredCamera = projectSession.cameraSnapshot;
 	if (restoredCamera) {
+		viewer.camera.cancelFlight();
 		viewer.camera.setView({
 			destination: Cartesian3.fromArray([...restoredCamera.position]),
 			orientation: {
@@ -921,32 +1054,92 @@ async function main(): Promise<void> {
 	);
 	let selectedFeature: PlateFeature | undefined;
 	let selectedPointRecord: PointRecord | undefined;
+	let selectedNativeAttributes: Record<string, unknown> | null | undefined;
+	let selectedNativeKey: SelectionKey | undefined;
+	let featureSelection: FeatureSelection | undefined;
+	const plateFeaturesById = new Map<string, PlateFeature>();
+	const ambiguousPlateFeatureIds = new Set<string>();
+	for (const feature of gpmlParseResult.features) {
+		if (plateFeaturesById.has(feature.id)) ambiguousPlateFeatureIds.add(feature.id);
+		else plateFeaturesById.set(feature.id, feature);
+	}
 	let currentTimeState: RenderTimeState = renderer.updateTime(
 		initialAgeMa,
 		rotationModel,
 	);
 	let pointRenderer: GpuPointRenderer | undefined;
 	let pointPicker: PointPicker | undefined;
+	let invalidateActiveTimeLayers: (() => void) | undefined;
+	let appliedGlobeTimeMa = initialAgeMa;
+	type PointResources = { renderer?: GpuPointRenderer; picker?: PointPicker };
+	type PointReleaseResources = { renderer?: { destroy(): void }; picker?: { destroy(): void } };
+	// Only failed releases remain here. New loads are blocked until unload
+	// retries them, so a failed retirement cannot lose an owned GPU handle.
+	const pointResourcesToRelease = new Set<PointReleaseResources>();
+	function hasPendingPointRelease(): boolean {
+		return pointResourcesToRelease.size > 0;
+	}
 	let loadedPointDataset: LoadedPointDataset | undefined;
 	let loadedPointEntry: PointDatasetManifestEntry | undefined;
 	let pointLoadGeneration = 0;
 	let pointLoadAbortController: AbortController | undefined;
+	let rollbackPointLoad: (() => void) | undefined;
+	let pointLoadInFlight = false;
+	let pointPickGeneration = 0;
+	let pointDisposed = false;
+	function cancelPointLoad(reason: "cancelled" | "superseded" = "cancelled"): void {
+		featureSelection?.invalidatePending();
+		invalidateActiveTimeLayers?.();
+		// Restore synchronously before handing ownership to unload or a new
+		// selection. A stale async catch must never reinstall its old instance.
+		rollbackPointLoad?.();
+		rollbackPointLoad = undefined;
+		pointLoadGeneration += 1;
+		pointPickGeneration += 1;
+		pointLoadInFlight = false;
+		const active = pointLoadAbortController;
+		pointLoadAbortController = undefined;
+		active?.abort(new OperationInterruptedError(reason));
+		if (active && !pointDisposed) {
+			loadPointsButton.disabled = false;
+			pointDatasetSelect.disabled = false;
+			unloadPointsButton.disabled = !loadedPointEntry && !hasPendingPointRelease();
+			setPointPanelState("ready", "已取消", "点数据加载已取消，可重新选择并加载。");
+		}
+	}
 	let atlasController: PaleoAtlasLayerController | undefined;
+	let atlasRuntimeState: PaleoAtlasRuntimeState | undefined;
+	let atlasInitializationError = "";
 	let singleRasterController: SingleRasterLayerController | undefined;
+	let singleRasterRuntimeState: SingleRasterRuntimeState | undefined;
+	let singleRasterInitializationError = "";
+	const pendingLayerAttachments = new Set<() => void>();
+	const optionalLayerBoundary = {
+		isPreparing: () => projectionController?.getSnapshot().status === "preparing",
+		onSettled: (listener: () => void) => {
+			pendingLayerAttachments.add(listener);
+			return () => { pendingLayerAttachments.delete(listener); };
+		},
+		signal: manifestAbort.signal,
+	};
+	const attachPendingLayers = (): void => {
+		for (const attach of [...pendingLayerAttachments]) attach();
+	};
 	const performanceMonitor = new PerformanceMonitor(viewer);
 
 	const applyImageryOrder = (): void => {
 		for (const layer of [...projectSession.layerList].reverse()) {
-			if (layer.id === RUNTIME_LAYER_IDS.atlas) {
-				atlasController?.raiseToTop();
-			} else if (layer.id === RUNTIME_LAYER_IDS.raster) {
-				singleRasterController?.raiseToTop();
+			if (layer.type === ProjectLayerType.Atlas) {
+				atlasControllers.get(layer.id)?.raiseToTop();
+			} else if (layer.type === ProjectLayerType.Raster) {
+				rasterControllers.get(layer.id)?.raiseToTop();
 			}
 		}
 		viewer.scene.requestRender();
 	};
 
 	const updateAtlasState = (state: PaleoAtlasRuntimeState): void => {
+		atlasRuntimeState = state;
 		atlasStatus.dataset.state = state.status;
 		if (state.status === "loading") {
 			atlasFrameValue.textContent = `${state.frame.timeMa} Ma`;
@@ -959,7 +1152,7 @@ async function main(): Promise<void> {
 					? `${state.frame.label} · Martin raster tiles`
 					: `邻近帧 · ${state.frame.label}`;
 		} else if (state.status === "error") {
-			atlasFrameValue.textContent = `${state.frame.timeMa} Ma`;
+			atlasFrameValue.textContent = state.frame ? `${state.frame.timeMa} Ma` : "—";
 			atlasStatus.textContent = `图集瓦片不可用：${state.message}`;
 		} else {
 			atlasFrameValue.textContent = "—";
@@ -969,31 +1162,43 @@ async function main(): Promise<void> {
 					: "该时间超出图集 0–750 Ma 范围";
 		}
 		applyImageryOrder();
+		agentActions.notifyStateChanged("atlas");
 	};
 
-	try {
-		const atlasManifest = await atlasManifestPromise;
-		atlasController = new PaleoAtlasLayerController(
-			viewer,
-			new AtlasFrameResolver(atlasManifest),
-			updateAtlasState,
-		);
-		atlasController.setOpacity(
-			projectSession.getEffectiveLayerOpacity(RUNTIME_LAYER_IDS.atlas),
-		);
-		atlasController.setTime(initialAgeMa);
-		atlasController.setVisible(
-			projectSession.getEffectiveLayerVisibility(RUNTIME_LAYER_IDS.atlas),
-		);
-		atlasVisibility.disabled = false;
-	} catch (error) {
-		atlasVisibility.checked = false;
-		atlasVisibility.disabled = true;
-		atlasFrameValue.textContent = "—";
-		atlasStatus.dataset.state = "error";
-		atlasStatus.textContent =
-			error instanceof Error ? error.message : String(error);
-	}
+	const initializeAtlas = async (): Promise<void> => {
+		try {
+			const result = await atlasManifestPromise;
+			if (manifestAbort.signal.aborted) return;
+			if (!result.ok) throw result.error;
+			const parsed = parsePaleoAtlasManifest(result.value);
+			await attachOptionalLayer(optionalLayerBoundary, () => {
+				atlasManifest = parsed;
+				const restoringLayers = projectSession.layerList.filter(layer => layer.type === ProjectLayerType.Atlas);
+				atlasVisibility.disabled = false;
+				manifestStatus.atlas = "ready";
+				publishAtlasState();
+				for (const layer of restoringLayers) {
+					if (projectSession.getLayer(layer.id)?.sourceRef !== layer.sourceRef) continue;
+					void loadAtlasInstance(layer.id, layer.sourceRef).catch(() => undefined);
+				}
+			});
+		} catch (error) {
+			if (manifestAbort.signal.aborted) return;
+			manifestStatus.atlas = "error";
+			reportManifestFailure("atlas", error);
+			atlasVisibility.checked = false;
+			atlasVisibility.disabled = true;
+			atlasFrameValue.textContent = "—";
+			atlasStatus.dataset.state = "error";
+			atlasInitializationError = error instanceof Error ? error.message : String(error);
+			atlasStatus.textContent = atlasInitializationError;
+		} finally {
+			if (!manifestAbort.signal.aborted) {
+				agentActions.notifyStateChanged("startupResources");
+				agentActions.notifyStateChanged("atlas");
+			}
+		}
+	};
 
 	const formatRasterValue = (value: number, units: string): string => {
 		const formatted =
@@ -1028,13 +1233,19 @@ async function main(): Promise<void> {
 	};
 
 	const updateSingleRasterState = (state: SingleRasterRuntimeState): void => {
+		singleRasterRuntimeState = state;
+		const retainCommittedLegend = (): void => {
+			const committed = singleRasterController?.getCommittedRaster();
+			if (committed) updateSingleRasterLegend(committed);
+			else singleRasterLegend.hidden = true;
+		};
 		singleRasterStatus.dataset.state = state.status;
 		singleRasterStatus.dataset.rasterId = state.raster?.id ?? "";
 		singleRasterState.dataset.state = state.status;
 		if (state.status === "loading") {
 			singleRasterState.textContent = "加载中";
 			singleRasterStatus.textContent = `正在加载 ${state.raster.label}…`;
-			updateSingleRasterLegend(state.raster);
+			retainCommittedLegend();
 		} else if (state.status === "ready") {
 			singleRasterState.textContent = "已显示";
 			singleRasterStatus.textContent = `${state.raster.sourceFile} · Martin PNG tiles`;
@@ -1042,52 +1253,65 @@ async function main(): Promise<void> {
 		} else if (state.status === "hidden") {
 			singleRasterState.textContent = "已隐藏";
 			singleRasterStatus.textContent = "栅格图层已关闭";
+			singleRasterLegend.hidden = true;
 		} else {
 			singleRasterState.textContent = "失败";
 			singleRasterStatus.textContent = `${state.raster.label}：${state.message}`;
-			updateSingleRasterLegend(state.raster);
+			retainCommittedLegend();
 		}
 		applyImageryOrder();
+		agentActions.notifyStateChanged("raster");
 	};
 
-	try {
-		const singleRasterManifest = await singleRasterManifestPromise;
-		singleRasterSelect.replaceChildren(
-			...singleRasterManifest.rasters.map((raster) => {
-				const option = document.createElement("option");
-				option.value = raster.id;
-				option.textContent = raster.label;
-				return option;
-			}),
-		);
-		singleRasterSelect.value = singleRasterManifest.defaultRasterId;
-		singleRasterController = new SingleRasterLayerController(
-			viewer,
-			singleRasterManifest,
-			updateSingleRasterState,
-		);
-		singleRasterController.setOpacity(
-			projectSession.getEffectiveLayerOpacity(RUNTIME_LAYER_IDS.raster),
-		);
-		singleRasterController.select(singleRasterManifest.defaultRasterId);
-		singleRasterController.setVisible(
-			projectSession.getEffectiveLayerVisibility(RUNTIME_LAYER_IDS.raster),
-		);
-		applyImageryOrder();
-		singleRasterSelect.disabled = false;
-		singleRasterVisibility.disabled = false;
-		singleRasterOpacity.disabled = false;
-	} catch (error) {
-		singleRasterVisibility.checked = false;
-		singleRasterSelect.disabled = true;
-		singleRasterVisibility.disabled = true;
-		singleRasterOpacity.disabled = true;
-		singleRasterState.dataset.state = "error";
-		singleRasterState.textContent = "数据缺失";
-		singleRasterStatus.dataset.state = "error";
-		singleRasterStatus.textContent =
-			error instanceof Error ? error.message : String(error);
-	}
+	const initializeSingleRaster = async (): Promise<void> => {
+		try {
+			const result = await singleRasterManifestPromise;
+			if (manifestAbort.signal.aborted) return;
+			if (!result.ok) throw result.error;
+			const singleRasterManifest = parseSingleRasterManifest(result.value);
+			await attachOptionalLayer(optionalLayerBoundary, () => {
+				const restoringLayers = projectSession.layerList.filter(layer => layer.type === ProjectLayerType.Raster);
+				singleRasterSelect.replaceChildren(
+					...singleRasterManifest.rasters.map((raster) => {
+						const option = document.createElement("option");
+						option.value = raster.id;
+						option.textContent = raster.label;
+						return option;
+					}),
+				);
+				rasterManifest = singleRasterManifest;
+				// Invalid restored IDs must not visually fall back to the first option.
+				singleRasterSelect.value = "";
+				singleRasterSelect.disabled = false;
+				singleRasterVisibility.disabled = false;
+				singleRasterOpacity.disabled = false;
+				manifestStatus.raster = "ready";
+				publishRasterState();
+				for (const layer of restoringLayers) {
+					if (projectSession.getLayer(layer.id)?.sourceRef !== layer.sourceRef) continue;
+					void loadRasterInstance(layer.id, layer.sourceRef).catch(() => undefined);
+				}
+			});
+		} catch (error) {
+			if (manifestAbort.signal.aborted) return;
+			manifestStatus.raster = "error";
+			reportManifestFailure("raster", error);
+			singleRasterVisibility.checked = false;
+			singleRasterSelect.disabled = true;
+			singleRasterVisibility.disabled = true;
+			singleRasterOpacity.disabled = true;
+			singleRasterState.dataset.state = "error";
+			singleRasterState.textContent = "数据缺失";
+			singleRasterStatus.dataset.state = "error";
+			singleRasterInitializationError = error instanceof Error ? error.message : "Raster manifest could not be loaded.";
+			singleRasterStatus.textContent = singleRasterInitializationError;
+		} finally {
+			if (!manifestAbort.signal.aborted) {
+				agentActions.notifyStateChanged("startupResources");
+				agentActions.notifyStateChanged("raster");
+			}
+		}
+	};
 
 	const setPointPanelState = (
 		state: "ready" | "busy" | "error",
@@ -1098,6 +1322,7 @@ async function main(): Promise<void> {
 		pointStateChip.textContent = label;
 		pointStatus.dataset.state = state;
 		pointStatus.textContent = message;
+		agentActions.notifyStateChanged("points");
 	};
 
 	const updateVisiblePointCount = (ageMa: number): void => {
@@ -1115,6 +1340,19 @@ async function main(): Promise<void> {
 	};
 
 	const updateInspector = (): void => {
+		if (selectedNativeKey) {
+			inspectorEmpty.hidden = true;
+			inspectorContent.hidden = false;
+			const summary = summarizeFeatureAttributes(selectedNativeAttributes ?? null);
+			const name = summary.attributes?.name;
+			selectedName.textContent = typeof name === "string" ? name : selectedNativeKey.featureId;
+			selectedId.textContent = `Layer ${selectedNativeKey.layerId} · ${selectedNativeKey.featureId}`;
+			selectedValidity.textContent = "Source coordinates · not reconstructed";
+			selectedState.textContent = summary.attributes === null ? "No source attributes" : "Source attribute preview";
+			selectedQuaternion.textContent = Object.entries(summary.attributes ?? {}).slice(0, 6)
+				.map(([key, value]) => `${key}: ${String(typeof value === "string" ? value : JSON.stringify(value)).slice(0, 160)}`).join("\n");
+			return;
+		}
 		if (selectedPointRecord) {
 			const record = selectedPointRecord;
 			inspectorEmpty.hidden = true;
@@ -1122,7 +1360,7 @@ async function main(): Promise<void> {
 			selectedName.textContent = `PBDB row ${record.rowId.toLocaleString()}`;
 			selectedId.textContent = `Plate ID ${record.plateId}`;
 			selectedValidity.textContent = `${record.validFromMa} → ${record.validToMa} Ma`;
-			const currentAgeMa = timeline.currentAgeMa;
+			const currentAgeMa = projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa;
 			const visible =
 				currentAgeMa <= record.validFromMa && currentAgeMa >= record.validToMa;
 			selectedState.textContent = `${visible ? "Visible" : "Outside valid time"} · ${record.occurrenceCount.toLocaleString()} occurrences`;
@@ -1133,6 +1371,9 @@ async function main(): Promise<void> {
 			return;
 		}
 		if (!selectedFeature) {
+			inspectorContent.hidden = true;
+			inspectorEmpty.hidden = false;
+			for (const field of [selectedName, selectedId, selectedValidity, selectedState, selectedQuaternion]) field.textContent = "—";
 			return;
 		}
 		inspectorEmpty.hidden = true;
@@ -1144,7 +1385,7 @@ async function main(): Promise<void> {
 		)} → ${formatTimeBoundary(selectedFeature.validToMa)}`;
 		const valid = isFeatureValidAtTime(
 			selectedFeature,
-			Number(ageValue.textContent ?? 0),
+			projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa,
 		);
 		const rotation = currentTimeState.rotationMap.get(selectedFeature.plateId);
 		selectedState.textContent = valid
@@ -1155,10 +1396,75 @@ async function main(): Promise<void> {
 		selectedQuaternion.textContent = formatQuaternion(rotation);
 	};
 
-	renderer.setPickCallback((pick: PlatePick) => {
-		selectedPointRecord = undefined;
-		selectedFeature = pick.feature;
+	function assertSelectionViewport(viewportId: string): void {
+		if (viewportId !== "main") throw new AgentActionValidationError("Unknown viewport.");
+		if (pointDisposed || viewer.scene.isDestroyed()) throw new AgentActionBusyError("The viewport is being disposed.");
+	}
+	function readSelectionFeature(key: SelectionKey): SelectionFeature {
+		assertSelectionViewport(key.viewportId);
+		const layer = projectSession.getLayer(key.layerId);
+		if (!layer) throw new AgentActionValidationError("Unknown feature layer.");
+		const frame = projectionController?.getSnapshot();
+		const timeMa = frame?.committedTimeMa ?? initialAgeMa;
+		const committedRotations = rotationModel.getRotationMap(timeMa, 0);
+		const visible = projectSession.getEffectiveLayerVisibility(key.layerId) && projectSession.getEffectiveLayerOpacity(key.layerId) > 0;
+		if (key.layerId === RUNTIME_LAYER_IDS.plateModel) {
+			if (ambiguousPlateFeatureIds.has(key.featureId)) throw new AgentActionUnsupportedError("This source has ambiguous feature IDs.");
+			const feature = plateFeaturesById.get(key.featureId);
+			if (!feature) throw new AgentActionValidationError("Unknown plate feature.");
+			return { owner: renderer, sourceRef: loadedPlateSourceRef, attributes: projectPlateFeatureAttributes(feature),
+				selectable: visible && isFeatureValidAtTime(feature, timeMa) && committedRotations.has(feature.plateId) };
+		}
+		if (key.layerId === RUNTIME_LAYER_IDS.points) {
+			if (!loadedPointDataset || !pointRenderer || hasPendingPointRelease()) throw new AgentActionBusyError("The point source is not ready.");
+			const attributes = readPointFeatureAttributes(loadedPointDataset, key.featureId);
+			const style = projectSession.getLayer(key.layerId)?.pointStyle;
+			return { owner: loadedPointDataset, sourceRef: `wgp1:${encodeURIComponent(loadedPointDataset.datasetId)}`, attributes,
+				selectable: visible && frame?.committedId === "globe" && !!style &&
+					timeMa <= attributes.validFromMa && timeMa >= attributes.validToMa &&
+					(style.filter.plateId === null || style.filter.plateId === attributes.plateId) &&
+					attributes.occurrenceCount >= style.filter.minimumOccurrence && attributes.occurrenceCount <= style.filter.maximumOccurrence &&
+					committedRotations.has(attributes.plateId) };
+		}
+		if (![ProjectLayerType.Point, ProjectLayerType.Line, ProjectLayerType.Polygon].includes(layer.type)) {
+			throw new AgentActionUnsupportedError("This layer does not expose vector feature attributes.");
+		}
+		const owner = nativeSelectionOwners.get(key.layerId);
+		if (!owner || nativePointRuntime?.get(key.layerId)?.runtimeStatus !== "ready") throw new AgentActionBusyError("The vector source is not ready.");
+		const attributes = nativePointRuntime.getAttributes(key.layerId, key.featureId);
+		if (attributes === undefined) throw new AgentActionValidationError("Unknown vector feature.");
+		return { owner, sourceRef: owner.sourceRef, attributes, selectable: visible && frame?.committedId === "globe" };
+	}
+	function reconcileFeatureSelection(): void {
+		featureSelection?.invalidatePending();
+		featureSelection?.reconcile(key => {
+			try { const feature = readSelectionFeature(key); return feature.selectable ? feature.owner : undefined; }
+			catch { return undefined; }
+		});
+	}
+	featureSelection = new FeatureSelection(snapshot => {
+		selectedFeature = undefined; selectedPointRecord = undefined;
+		selectedNativeKey = undefined; selectedNativeAttributes = undefined;
+		if (snapshot.key) {
+			const key = snapshot.key;
+			if (key.layerId === RUNTIME_LAYER_IDS.plateModel) selectedFeature = plateFeaturesById.get(key.featureId);
+			else if (key.layerId === RUNTIME_LAYER_IDS.points && loadedPointDataset) selectedPointRecord = readPointRecord(loadedPointDataset.buffer, parsePointFeatureId(key.featureId, loadedPointDataset));
+			else { selectedNativeKey = key; selectedNativeAttributes = nativePointRuntime?.getAttributes(key.layerId, key.featureId); }
+		}
 		updateInspector();
+		agentActions.diagnostics.record({ level: "info", category: "app", event: `selection.${snapshot.source}.changed`, outcome: "completed" },
+			{ viewportId: snapshot.key?.viewportId ?? "main", layerId: snapshot.key?.layerId, featureId: snapshot.key?.featureId });
+		agentActions.notifyStateChanged("selection");
+	});
+	const selectionPorts = { assertViewport: assertSelectionViewport, readFeature: readSelectionFeature };
+	requiredElement("#clear-feature-selection", HTMLButtonElement).addEventListener("click", () => {
+		try { clearFeatureSelection(featureSelection!, selectionPorts, "main", "ui"); }
+		catch (error) { agentActions.diagnostics.record({ level: "warn", category: "app", event: "selection.clear-failed", outcome: "failed", error }); }
+	});
+	renderer.setPickCallback((pick: PlatePick) => {
+		const key = { viewportId: "main", layerId: RUNTIME_LAYER_IDS.plateModel, featureId: pick.feature.id };
+		try { selectFeature(featureSelection!, selectionPorts, key, "ui"); }
+		catch (error) { agentActions.diagnostics.record({ level: "warn", category: "app", event: "selection.pick-failed", outcome: "failed", error }); }
 	});
 
 	let projectionController: ProjectionController | undefined;
@@ -1176,18 +1482,16 @@ async function main(): Promise<void> {
 		},
 		{
 			minAgeMa: 0,
-			maxAgeMa: 538.8,
+			maxAgeMa: projectTimeRange.maxAgeMa,
 			initialAgeMa,
 			reverse: true,
-			onChange: (ageMa) => {
+			onStateChange: () => agentActions.notifyStateChanged("time"),
+			onChange: (ageMa, signal) => {
 				performanceMonitor.markInteraction();
-				atlasController?.setTime(ageMa);
-				// One latest-request control for globe and rectangle: in globe this is
-				// the synchronous fast path (applyGlobeFrame runs before the next line),
-				// in rectangle it prepares + commits a new frame asynchronously while the
-				// old picture stays until the new one is verified.
+				// The active request prepares every participating layer before displaying
+				// its age. Pending inputs must not independently switch the Atlas.
 				if (projectionController) {
-					timelineFrame = projectionController.setTime(ageMa);
+					timelineFrame = projectionController.setTime(ageMa, { signal });
 					void timelineFrame.catch(() => {
 						// A superseded or failed time change keeps the committed view; the
 						// projection status line already reports it.
@@ -1199,8 +1503,10 @@ async function main(): Promise<void> {
 				timelineAgeMirror.textContent = ageLabel;
 				eraLabel.textContent = eraForAge(ageMa);
 				projectSession.setTime(ageMa);
-				updateVisiblePointCount(ageMa);
+				publishProjectState();
+				updateVisiblePointCount(projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa);
 				updateInspector();
+				agentActions.notifyStateChanged("time");
 			},
 		},
 	);
@@ -1295,20 +1601,15 @@ async function main(): Promise<void> {
 	};
 
 	const applyProjectionStateToUI = (snapshot: ProjectionSnapshot): void => {
+		reconcileFeatureSelection();
 		projectionSelect.disabled = false;
 		projectionSelect.value =
 			snapshot.status === "preparing"
 				? snapshot.requestedId
 				: snapshot.committedId;
-		const rectangleOption = projectionSelect.querySelector<HTMLOptionElement>(
-			'option[value="rectangle"]',
-		);
-		const rectangleMode = snapshot.availableModes.find(
-			(mode) => mode.projectionId === "rectangle",
-		);
-		if (rectangleOption && rectangleMode) {
-			rectangleOption.disabled = !rectangleMode.available;
-			rectangleOption.title = rectangleMode.reason ?? "";
+		for (const mode of snapshot.availableModes) {
+			const option = projectionSelect.querySelector<HTMLOptionElement>(`option[value="${mode.projectionId}"]`);
+			if (option) { option.disabled = !mode.available; option.title = mode.reason ?? ""; }
 		}
 		projectionStatus.dataset.state = snapshot.status;
 		projectionStatus.textContent = projectionStatusText(snapshot);
@@ -1316,6 +1617,8 @@ async function main(): Promise<void> {
 			snapshot.committedTimeState.activePlateCount.toLocaleString();
 		activeFeatures.textContent =
 			snapshot.committedTimeState.activeFeatureCount.toLocaleString();
+		if (snapshot.status !== "preparing") attachPendingLayers();
+		agentActions.notifyStateChanged("projection");
 	};
 
 	// The inspector and point picker read `currentTimeState`. In globe the
@@ -1340,22 +1643,34 @@ async function main(): Promise<void> {
 		viewer,
 		plateRenderer: renderer,
 		rotationModel,
-		incompatibleLayerIds: PROJECTION_INCOMPATIBLE_LAYER_IDS,
+		get incompatibleLayerIds() {
+			// Until their P3 projection paths are integrated, new native instances
+			// obey the same honest capability guard as the existing data layers.
+			return projectSession.layerList.filter(layer => layer.id !== RUNTIME_LAYER_IDS.plateModel).map(layer => layer.id);
+		},
 		getCurrentTimeMa: () => timeline.currentAgeMa,
 		isLayerVisible: (layerId) =>
 			projectSession.getEffectiveLayerVisibility(layerId),
 		describeLayer: describeProjectionLayer,
 		onCommittedTimeChange: () => {
+			// The accepted frame has released its layer owner. Install late optional
+			// resources now, before the next queued time captures its participants.
+			attachPendingLayers();
 			// In rectangle, refresh the committed-age rotation map so the inspector
 			// reflects the frame actually shown; in globe applyGlobeFrame already did.
-			if (projectionController?.activeMode === "rectangle") {
+			if (projectionController?.activeMode !== "globe") {
 				refreshRectangleTimeState();
-				updateInspector();
 			}
+			updateVisiblePointCount(projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa);
+			updateInspector();
 		},
 		onStateChange: applyProjectionStateToUI,
 		setGlobeInertiaEnabled: (enabled) => {
 			globeSpinInertiaEnabled = enabled;
+			if (!enabled) {
+				cameraResetCompletion.cancel("superseded");
+				cancelGlobeMomentum.get(viewer)?.();
+			}
 		},
 		captureGlobeCamera: () => {
 			savedGlobeCamera = {
@@ -1391,13 +1706,137 @@ async function main(): Promise<void> {
 		},
 		applyGlobeFrame: (timeMa) => {
 			currentTimeState = renderer.updateTime(timeMa, rotationModel);
-			pointRenderer?.setTime(timeMa, currentTimeState.rotationMap);
+			appliedGlobeTimeMa = timeMa;
 			return {
 				activeFeatureCount: currentTimeState.activeFeatureCount,
 				activePlateCount: currentTimeState.activePlateCount,
 				disconnectedFeatureCount: currentTimeState.disconnectedFeatureCount,
 			};
 		},
+		captureTimeLayers: (context) => {
+			// Flat modes still exclude these visible layers. Their support is P3 work.
+			if (context.mode !== "globe") return {
+				ready: Promise.resolve(), activate() {}, canConfirm: () => true,
+				accept() {}, rollback() {}, retire() {},
+			};
+			const visibility = PROJECTION_INCOMPATIBLE_LAYER_IDS.map(id => projectSession.getEffectiveLayerVisibility(id));
+			if (visibility[1] && pointLoadInFlight) throw new AgentActionBusyError("Wait for the point dataset to finish loading before changing time.");
+			if (visibility[1] && hasPendingPointRelease()) throw new AgentActionBusyError("Retry point unloading before changing time.");
+			const capturedPoint = pointRenderer;
+			const capturedPointGeneration = pointLoadGeneration;
+			if (projectSession.layerList.some(layer => isLayerRetrying(layer.id))) throw new AgentActionBusyError("Wait for layer retry to finish before changing time.");
+			if (atlasRemovals.size || atlasCleanupPending.size) throw new AgentActionBusyError("Finish Atlas cleanup before changing time.");
+			for (const layer of projectSession.layerList) {
+				if (layer.type !== ProjectLayerType.Atlas || !projectSession.getEffectiveLayerVisibility(layer.id)) continue;
+				if (layer.id === RUNTIME_LAYER_IDS.atlas && manifestStatus.atlas !== "ready") continue;
+				if (!atlasControllers.has(layer.id) || atlasErrors.has(layer.id)) {
+					throw new AgentActionUnsupportedError(`Visible Atlas layer ${layer.id} is unavailable. Retry its load or hide it before changing time.`);
+				}
+			}
+			const capturedAtlases = [...atlasControllers].map(([id, controller]) => ({
+				id, controller, visible: projectSession.getEffectiveLayerVisibility(id), sourceRef: projectSession.getLayer(id)?.sourceRef,
+			}));
+			if (rasterRemovals.size || rasterCleanupPending.size) throw new AgentActionBusyError("Finish raster cleanup before changing time.");
+			for (const layer of projectSession.layerList) {
+				if (layer.type !== ProjectLayerType.Raster || !projectSession.getEffectiveLayerVisibility(layer.id)) continue;
+				// The built-in raster manifest is optional for the core view. Its
+				// failure stays explicit, without locking plate/time interaction.
+				if (layer.id === RUNTIME_LAYER_IDS.raster && manifestStatus.raster !== "ready") continue;
+				if (!rasterControllers.has(layer.id) || rasterErrors.has(layer.id) || rasterStates.get(layer.id)?.status === "error") {
+					throw new AgentActionUnsupportedError(`Visible Raster layer ${layer.id} is unavailable. Retry its load or hide it before changing time.`);
+				}
+			}
+			const capturedRasters = [...rasterControllers].map(([id, controller]) => ({
+				id, controller, visible: projectSession.getEffectiveLayerVisibility(id), rasterId: rasterStates.get(id)?.raster?.id,
+			}));
+			const previousTimeMa = projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa;
+			const previousRotations = rotationModel.getRotationMap(previousTimeMa, 0);
+			const targetRotations = rotationModel.getRotationMap(context.ageMa, 0);
+			let atlasTicket: AtlasTimeGroup | undefined;
+			let invalidated = false;
+			let activated = false;
+			let accepted = false;
+			let finished = false;
+			const invalidate = (): void => {
+				if (finished || accepted || invalidated) return;
+				invalidated = true;
+				context.onFailure(new OperationInterruptedError("superseded", "A participating layer changed during time preparation."));
+			};
+			const validate = (): void => {
+				if (finished || invalidated || context.signal.aborted || pointDisposed ||
+					capturedPoint !== pointRenderer || capturedPointGeneration !== pointLoadGeneration ||
+					capturedAtlases.length !== atlasControllers.size ||
+					capturedAtlases.some(item => atlasControllers.get(item.id) !== item.controller ||
+						item.sourceRef !== projectSession.getLayer(item.id)?.sourceRef || item.visible !== projectSession.getEffectiveLayerVisibility(item.id)) ||
+					capturedRasters.length !== rasterControllers.size ||
+					capturedRasters.some(item => rasterControllers.get(item.id) !== item.controller ||
+						item.rasterId !== rasterStates.get(item.id)?.raster?.id || item.visible !== projectSession.getEffectiveLayerVisibility(item.id)) ||
+					visibility.some((visible, index) => visible !== projectSession.getEffectiveLayerVisibility(PROJECTION_INCOMPATIBLE_LAYER_IDS[index]!))) {
+					throw new OperationInterruptedError("superseded");
+				}
+			};
+			const detach = (): void => {
+				if (invalidateActiveTimeLayers === invalidate) invalidateActiveTimeLayers = undefined;
+			};
+			invalidateActiveTimeLayers = invalidate;
+			// A static raster selection is a separate operation. Finish that captured
+			// selection before preparing a time frame; never select it again per age.
+			const rasterReady = Promise.all(capturedRasters.filter(item => item.visible)
+				.map(item => item.controller.whenReady({ signal: context.signal })));
+			// Initial attachment/visibility can have its own standalone Atlas load.
+			// Join that exact requested frame before claiming the coordinated owner.
+			const atlasReady = Promise.all(capturedAtlases.map(item => {
+				const loading = atlasLoads.get(item.id);
+				if (loading) return loading.promise;
+				const state = atlasStates.get(item.id);
+				return state?.status === "loading" ? executeAtlasTime(item.controller, state.requestedAgeMa, context.signal) : Promise.resolve();
+			}));
+			const ready = Promise.all([rasterReady, atlasReady]).then(() => {
+				validate();
+				if (capturedRasters.some(item => item.visible && item.controller.getCommittedRaster()?.id !== item.rasterId)) {
+					throw new OperationInterruptedError("superseded", "The captured raster selection did not commit.");
+				}
+				atlasTicket = prepareAtlasTimeGroup(capturedAtlases.map(item => item.controller), context.ageMa, {
+					owner: context.owner, signal: context.signal, onFailure: context.onFailure,
+				});
+				return atlasTicket?.ready;
+			});
+			return {
+				ready,
+				activate() {
+					validate();
+					activated = true;
+					if (visibility[1]) capturedPoint?.setTime(context.ageMa, targetRotations);
+					atlasTicket?.activate();
+				},
+				canConfirm() { validate(); return atlasTicket?.canConfirm() ?? true; },
+				accept() {
+					validate();
+					atlasTicket?.accept();
+					accepted = true;
+				},
+				rollback() {
+					if (finished || accepted) return;
+					finished = true;
+					detach();
+					const failures: unknown[] = [];
+					try { atlasTicket?.rollback(); } catch (error) { failures.push(error); }
+					if (activated && visibility[1] && capturedPoint === pointRenderer && !pointDisposed) {
+						try { capturedPoint?.setTime(previousTimeMa, previousRotations); } catch (error) { failures.push(error); }
+					}
+					if (failures.length) throw new AggregateError(failures, "Time layer rollback failed.");
+				},
+				retire() {
+					if (finished) return;
+					finished = true;
+					detach();
+					atlasTicket?.retire();
+				},
+			};
+		},
+		onTimeLayerCleanupError: (error) => agentActions.diagnostics.record({
+			level: "error", category: "render", event: "time.layers.cleanup-failed", outcome: "failed", error,
+		}),
 		globeHome: () => setCameraHome(viewer),
 	});
 	projectionController.initialize(initialAgeMa, {
@@ -1405,31 +1844,98 @@ async function main(): Promise<void> {
 		activePlateCount: currentTimeState.activePlateCount,
 		disconnectedFeatureCount: currentTimeState.disconnectedFeatureCount,
 	});
+	const readCommittedPointFrame = () => {
+		const timeMa = projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa;
+		return { timeMa, rotationMap: rotationModel.getRotationMap(timeMa, 0) };
+	};
+	const notifyCameraState = (): void => {
+		featureSelection?.invalidatePending();
+		if (projectionController?.sceneMode === "globe") {
+			projectSession.setCamera({
+				position: [viewer.camera.positionWC.x, viewer.camera.positionWC.y, viewer.camera.positionWC.z],
+				direction: [viewer.camera.directionWC.x, viewer.camera.directionWC.y, viewer.camera.directionWC.z],
+				up: [viewer.camera.upWC.x, viewer.camera.upWC.y, viewer.camera.upWC.z],
+			});
+			publishProjectState();
+		}
+		agentActions.notifyStateChanged("projection");
+	};
+	stateObserverCleanup.push(viewer.camera.changed.addEventListener(notifyCameraState));
+	stateObserverCleanup.push(viewer.camera.moveEnd.addEventListener(notifyCameraState));
+	const loadedPlateSourceRef = plateModelSourceRef(resolvePlateModelSource(sharedSelection));
+	const unsubscribeProjectionSource = phase1BCloudClient.subscribe((state) => {
+		if (plateModelSourceRef(resolvePlateModelSource(state.selection)) !== loadedPlateSourceRef) {
+			featureSelection?.clear("runtime");
+			cancelPointLoad("superseded");
+			cameraResetCompletion.cancel("superseded");
+			projectionController?.invalidateSource();
+		}
+	});
+	window.addEventListener("pagehide", function releaseProjection(event) {
+		if (event.persisted) return;
+		window.removeEventListener("pagehide", releaseProjection);
+		startupFrameAbort.abort();
+		featureSelection?.clear("runtime");
+		unsubscribeProjectionSource();
+		for (const owner of nativePointSourceLoads.values()) owner.abort.abort(new OperationInterruptedError("cancelled"));
+		for (const owner of rasterLoads.values()) owner.abort.abort(new OperationInterruptedError("cancelled"));
+		for (const owner of atlasLoads.values()) owner.abort.abort(new OperationInterruptedError("cancelled"));
+		void nativePointRuntime?.dispose().catch(error => {
+			agentActions.diagnostics.record({ level: "error", category: "app", event: "native-points.cleanup-failed", outcome: "failed", error });
+		});
+		for (const release of [
+			() => {
+				pointDisposed = true;
+				cancelPointLoad();
+				clearPointRuntime();
+			},
+			...[...atlasControllers.values()].map(controller => () => controller.destroy()),
+			...[...rasterControllers.values()].map(controller => () => controller.destroy()),
+			() => cameraResetCompletion.destroy(), () => projectionController?.destroy(),
+		]) {
+			try { release(); }
+			catch (error) {
+				agentActions.diagnostics.record({ level: "error", category: "app", event: "app.cleanup-failed", outcome: "failed", error });
+			}
+		}
+	});
 	projectionSelect.addEventListener("change", () => {
-		void projectionController?.select(projectionSelect.value).catch(() => {
-			// The failure is already reflected in the status line and the select
-			// has snapped back to the committed mode through onStateChange.
+		void agentActions.execute(AGENT_ACTIONS.projectionSelect, { projectionId: projectionSelect.value }).then(result => {
+			if (!result.ok) {
+				projectionSelect.value = projectionController?.getSnapshot().committedId ?? "globe";
+				projectionStatus.textContent = result.error.message;
+			}
 		});
 	});
 
-	let pointPickGeneration = 0;
 	viewer.scene.canvas.addEventListener("click", async (event) => {
+		const bounds = viewer.scene.canvas.getBoundingClientRect();
+		const screen = new Cartesian2(event.clientX - bounds.left, event.clientY - bounds.top);
+		const picked = viewer.scene.pick(screen);
+		const native = nativePointRuntime?.resolvePick(picked);
+		if (native) {
+			const key = { viewportId: "main", layerId: native.layerId, featureId: native.featureId };
+			try { selectFeature(featureSelection!, selectionPorts, key, "ui"); }
+			catch (error) { agentActions.diagnostics.record({ level: "warn", category: "app", event: "selection.pick-failed", outcome: "failed", error }); }
+			return;
+		}
+		const plateHit = picked?.id?.kind === "plate-feature";
 		const activePicker = pointPicker;
 		const dataset = loadedPointDataset;
 		if (
 			!activePicker ||
 			!dataset ||
-			!projectSession.getEffectiveLayerVisibility(RUNTIME_LAYER_IDS.points)
+			!projectSession.getEffectiveLayerVisibility(RUNTIME_LAYER_IDS.points) ||
+			projectSession.getEffectiveLayerOpacity(RUNTIME_LAYER_IDS.points) <= 0 ||
+			projectionController?.getSnapshot().committedId !== "globe"
 		) {
+			if (!plateHit) featureSelection?.clear("ui");
 			return;
 		}
-		const bounds = viewer.scene.canvas.getBoundingClientRect();
-		const screen = new Cartesian2(
-			event.clientX - bounds.left,
-			event.clientY - bounds.top,
-		);
 		const pickedSurface = viewer.camera.pickEllipsoid(screen, SPHERICAL_EARTH);
 		if (!pickedSurface) {
+			// Raised plate surfaces can be visible beyond the base sphere's limb.
+			if (!plateHit) featureSelection?.clear("ui");
 			return;
 		}
 		const target = Cartesian3.normalize(pickedSurface, new Cartesian3());
@@ -1451,28 +1957,40 @@ async function main(): Promise<void> {
 			return;
 		}
 		const generation = ++pointPickGeneration;
-		const rowId = await activePicker.pick({
-			maximumAngularDistance,
-			rotationMap: currentTimeState.rotationMap,
-			style,
-			target: [target.x, target.y, target.z],
-			timeMa: timeline.currentAgeMa,
-		});
+		const selectionGeneration = featureSelection!.beginPick();
+		const committedFrame = readCommittedPointFrame();
+		let rowId: number | undefined;
+		try {
+			rowId = await activePicker.pick({ maximumAngularDistance, rotationMap: committedFrame.rotationMap,
+				style, target: [target.x, target.y, target.z], timeMa: committedFrame.timeMa });
+		} catch (error) {
+			agentActions.diagnostics.record({ level: "warn", category: "app", event: "selection.pick-failed", outcome: "failed", error });
+			return;
+		}
 		if (
 			generation !== pointPickGeneration ||
-			rowId === undefined ||
 			dataset !== loadedPointDataset
 		) {
 			return;
 		}
-		selectedFeature = undefined;
-		selectedPointRecord = readPointRecord(dataset.buffer, rowId);
-		updateInspector();
+		if (rowId === undefined) {
+			if (!plateHit) featureSelection!.commitPick(selectionGeneration, null);
+			return;
+		}
+		const key = { viewportId: "main", layerId: RUNTIME_LAYER_IDS.points, featureId: createPointFeatureId(dataset.datasetId, rowId) };
+		try {
+			const feature = readSelectionFeature(key);
+			if (feature.selectable) featureSelection!.commitPick(selectionGeneration, key, feature.owner);
+			else if (!plateHit) featureSelection!.commitPick(selectionGeneration, null);
+		}
+		catch (error) { agentActions.diagnostics.record({ level: "warn", category: "app", event: "selection.pick-failed", outcome: "failed", error }); }
 	});
 
 	requiredElement("#home-camera", HTMLButtonElement).addEventListener(
 		"click",
-		() => projectionController?.home(),
+		() => { void agentActions.execute(AGENT_ACTIONS.cameraReset).then(result => {
+			if (!result.ok) projectionStatus.textContent = result.error.message;
+		}); },
 	);
 
 	/**
@@ -1480,9 +1998,56 @@ async function main(): Promise<void> {
 	 * action handler call the same function, so a programmatic change behaves
 	 * exactly like a user dragging the control.
 	 */
-	const selectSingleRaster = (rasterId: string): void => {
-		singleRasterSelect.value = rasterId;
-		singleRasterController?.select(rasterId);
+	const selectSingleRaster = async (rasterId: string, signal?: AbortSignal, layerId: number = RUNTIME_LAYER_IDS.raster) => {
+		validateRasterSelection(layerId, rasterId);
+		if (isLayerRetrying(layerId)) throw new AgentActionBusyError("Wait for this raster retry to finish before selecting a source.");
+		if (rasterLoads.has(layerId) || rasterRemovals.has(layerId) || rasterRemovalRequested.has(layerId)) throw new AgentActionBusyError("Wait for this raster instance to finish loading, or retry its requested removal.");
+		if (rasterCleanupPending.has(layerId) && layerId !== RUNTIME_LAYER_IDS.raster) throw new AgentActionBusyError("Finish removing this failed raster instance before selecting another source.");
+		if (signal?.aborted) throw new OperationInterruptedError("cancelled");
+		// Default layer removal is not exposed. Its explicit select retry owns
+		// cleanup; a failed removal of an ordinary instance must finish removal.
+		if (rasterCleanupPending.has(layerId)) await removeRasterInstance(layerId);
+		if (signal?.aborted) throw new OperationInterruptedError("cancelled");
+		invalidateActiveTimeLayers?.();
+		const controller = ensureRasterController(layerId);
+		const currentOwner = rasterSelectionOwners.get(layerId);
+		const owner = currentOwner?.rasterId === rasterId ? currentOwner : {
+			rasterId, generation: (rasterSelectionGenerations.get(layerId) ?? 0) + 1, waiters: 0, committed: false,
+		};
+		rasterSelectionOwners.set(layerId, owner);
+		rasterSelectionGenerations.set(layerId, owner.generation);
+		owner.waiters++;
+		const storedId = projectSession.getLayer(layerId)?.rasterId;
+		const previousId = controller.getCommittedRaster()?.id ?? (typeof storedId === "string" && rasterManifest?.rasters.some(entry => entry.id === storedId) ? storedId : undefined);
+		if (layerId === RUNTIME_LAYER_IDS.raster) singleRasterSelect.value = rasterId;
+		rasterErrors.delete(layerId);
+		try {
+			const result = await executeRasterSelection(controller, rasterId, signal);
+			if (rasterControllers.get(layerId) !== controller || rasterSelectionGenerations.get(layerId) !== owner.generation || rasterRemovalRequested.has(layerId) || !projectSession.getLayer(layerId)) throw new OperationInterruptedError("superseded");
+			if (signal?.aborted) {
+				if (owner.waiters === 1 && !owner.committed) {
+					if (previousId) await executeRasterSelection(controller, previousId);
+					else await removeRasterInstance(layerId, true);
+				}
+				throw new OperationInterruptedError("cancelled");
+			}
+			if (!owner.committed) {
+				projectSession.setRasterId(layerId, rasterId);
+				persistLayerEdit();
+				owner.committed = true;
+				publishRasterState();
+			}
+			return result;
+		} catch (error) {
+			if (rasterSelectionGenerations.get(layerId) === owner.generation && owner.waiters === 1 && !owner.committed) {
+				if (layerId === RUNTIME_LAYER_IDS.raster) singleRasterSelect.value = controller.getCommittedRaster()?.id ?? "";
+				publishRasterState();
+			}
+			throw error;
+		} finally {
+			owner.waiters--;
+			if (owner.waiters === 0 && rasterSelectionOwners.get(layerId) === owner) rasterSelectionOwners.delete(layerId);
+		}
 	};
 
 	const setPointSizePixels = (pointSizePx: number): number => {
@@ -1515,10 +2080,23 @@ async function main(): Promise<void> {
 		persistLayerEdit();
 	};
 
+	const assertPointLoadAvailable = (): void => {
+		if (pointDisposed) throw new OperationInterruptedError("cancelled", "The point runtime has been disposed.");
+		if (hasPendingPointRelease()) {
+			throw new AgentActionBusyError("Point resource cleanup failed. Retry unloading before loading another dataset.");
+		}
+		if (pointLoadInFlight) {
+			throw new AgentActionBusyError("A point dataset is already loading.");
+		}
+		projectionController?.assertGlobeRuntimeAvailable();
+	};
+
 	const selectLocalPointDataset = async (
 		datasetId: string,
 		load: boolean,
+		signal?: AbortSignal,
 	): Promise<void> => {
+		if (signal?.aborted) throw new OperationInterruptedError("cancelled");
 		const manifest = pointManifestRef;
 		if (!manifest) {
 			throw new AgentActionUnsupportedError(
@@ -1530,19 +2108,28 @@ async function main(): Promise<void> {
 				`Unknown point dataset "${datasetId}".`,
 			);
 		}
-		pointDatasetSelect.value = datasetId;
 		if (load) {
+			assertPointLoadAvailable();
 			if (!loadSelectedPointDataset) {
 				throw new AgentActionUnsupportedError(
 					"The point dataset manifest is not ready yet.",
 				);
 			}
-			await loadSelectedPointDataset();
 		}
+		if (pointDatasetSelect.value !== datasetId && pointLoadInFlight) {
+			cancelPointLoad("superseded");
+			loadPointsButton.disabled = false;
+			pointDatasetSelect.disabled = false;
+			setPointPanelState("ready", "已选择", "已取消旧点数据加载；可加载当前选择。");
+		}
+		pointDatasetSelect.value = datasetId;
+		if (load) await loadSelectedPointDataset!(signal);
 	};
 
 	singleRasterSelect.addEventListener("change", () => {
-		selectSingleRaster(singleRasterSelect.value);
+		// Use the same action/trace and owner as programmatic selection. The
+		// controller publishes UI state only for the operation it still owns.
+		void agentActions.execute(AGENT_ACTIONS.rasterSelect, { rasterId: singleRasterSelect.value });
 	});
 	singleRasterOpacity.addEventListener("input", () => {
 		const opacity = Number(singleRasterOpacity.value);
@@ -1565,7 +2152,7 @@ async function main(): Promise<void> {
 		// last globe snapshot is left untouched and a reload starts on the globe.
 		// `sceneMode` is the mode the scene is actually morphed to, so a mid-switch
 		// window never writes a flat camera.
-		if (projectionController?.sceneMode !== "rectangle") {
+		if (projectionController?.sceneMode === "globe") {
 			projectSession.setCamera({
 				direction: [
 					viewer.camera.directionWC.x,
@@ -1585,17 +2172,17 @@ async function main(): Promise<void> {
 		// Always written, including for "none": leaving the built-in default in
 			// place would make a saved project claim the local demo was used, and a
 			// V1 id must never be written into the versioned field.
-		projectSession.setLayerSourceRef(
-			RUNTIME_LAYER_IDS.plateModel,
-			plateModelSourceRef(plateSource),
+		if (projectSession.getLayer(RUNTIME_LAYER_IDS.plateModel)) projectSession.setLayerSourceRef(
+			RUNTIME_LAYER_IDS.plateModel, plateModelSourceRef(plateSource),
 		);
-		if (selection.datasetVersionId > 0) {
+		if (selection.datasetVersionId > 0 && projectSession.getLayer(RUNTIME_LAYER_IDS.points)) {
 			projectSession.setLayerSourceRef(
 				RUNTIME_LAYER_IDS.points,
 				`resource:dataset-version:${selection.datasetVersionId}`
 		);
 		}
 	};
+	captureCurrentProject = captureProjectState;
 
 	let cloudAutosaveTimer: number | undefined;
 	const scheduleCloudLayerAutosave = (): void => {
@@ -1608,18 +2195,7 @@ async function main(): Promise<void> {
 		}
 		cloudAutosaveTimer = window.setTimeout(async () => {
 			try {
-				captureProjectState();
-				projectSession.save(window.localStorage);
-				const cloudReference = await phase1BCloudClient.saveProject(
-					projectSession.toDocument(),
-				);
-				window.dispatchEvent(
-					new CustomEvent("timemachine:project-saved", {
-						detail: {
-							message: `Cloud draft r${cloudReference.revisionNumber} autosaved`,
-						},
-					}),
-				);
+				await saveProjectToCloud();
 			} catch (error) {
 				window.dispatchEvent(
 					new CustomEvent("timemachine:project-save-error", {
@@ -1633,9 +2209,363 @@ async function main(): Promise<void> {
 	};
 
 	const persistLayerEdit = (): void => {
-		captureProjectState();
-		projectSession.save(window.localStorage);
+		localProjectActions.saveLocal();
 		scheduleCloudLayerAutosave();
+	};
+	const publishAtlasState = (): void => {
+		const error = atlasErrors.get(RUNTIME_LAYER_IDS.atlas);
+		if (error) {
+			atlasStatus.dataset.state = "error";
+			atlasStatus.textContent = error;
+			const frame = atlasControllers.get(RUNTIME_LAYER_IDS.atlas)?.getCommittedFrame();
+			atlasFrameValue.textContent = frame ? `${frame.timeMa} Ma` : "—";
+		}
+		applyLayerState();
+		projectionController?.refreshCapabilities();
+		agentActions.notifyStateChanged("layers");
+		agentActions.notifyStateChanged("atlas");
+	};
+	const ensureAtlasController = (layerId: number): PaleoAtlasLayerController => {
+		const existing = atlasControllers.get(layerId);
+		if (existing) return existing;
+		if (!atlasManifest) throw new AgentActionUnsupportedError("The Atlas manifest is unavailable.");
+		const controller = new PaleoAtlasLayerController(viewer, new AtlasFrameResolver(atlasManifest), state => {
+			atlasStates.set(layerId, state);
+			if (state.status === "error") agentActions.diagnostics.record({
+				level: "error", category: "asset", event: "atlas.frame-failed", outcome: "failed", error: new Error(state.message),
+			}, { layerId });
+			if (layerId === RUNTIME_LAYER_IDS.atlas) updateAtlasState(state);
+			else applyImageryOrder();
+			publishAtlasState();
+		});
+		atlasControllers.set(layerId, controller);
+		if (layerId === RUNTIME_LAYER_IDS.atlas) atlasController = controller;
+		controller.setOpacity(projectSession.getEffectiveLayerOpacity(layerId));
+		controller.setVisible(projectSession.getEffectiveLayerVisibility(layerId));
+		return controller;
+	};
+	const releaseAtlasController = async (layerId: number, controller?: PaleoAtlasLayerController): Promise<void> => {
+		try {
+			controller?.destroy();
+			await waitForPointLayerFrame(viewer, undefined, {
+				timeMa: projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa, show: false,
+				isCurrent: () => atlasControllers.get(layerId) === controller,
+			});
+		} catch (error) { atlasCleanupPending.add(layerId); throw error; }
+		atlasCleanupPending.delete(layerId);
+		if (atlasControllers.get(layerId) === controller) atlasControllers.delete(layerId);
+		if (layerId === RUNTIME_LAYER_IDS.atlas && atlasController === controller) atlasController = undefined;
+		atlasStates.delete(layerId);
+	};
+	const loadAtlasInstance = (layerId: number, sourceRef: string, signal?: AbortSignal): Promise<void> => {
+		const loading = atlasLoads.get(layerId);
+		if (loading) return loading.promise;
+		const abort = new AbortController();
+		const owner = { abort, promise: Promise.resolve() as Promise<void> };
+		const forward = (): void => abort.abort(signal?.reason);
+		signal?.addEventListener("abort", forward, { once: true });
+		if (signal?.aborted) forward();
+		atlasLoads.set(layerId, owner);
+		atlasErrors.delete(layerId);
+		owner.promise = (async () => {
+			let controller: PaleoAtlasLayerController | undefined;
+			try {
+				if (abort.signal.aborted || manifestAbort.signal.aborted) throw new OperationInterruptedError("cancelled");
+				if (sourceRef !== PALEO_ATLAS_SOURCE) throw new AgentActionUnsupportedError("The stored Atlas source is not implemented.");
+				invalidateActiveTimeLayers?.();
+				controller = ensureAtlasController(layerId);
+				const timeMa = projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa;
+				const result = await executeAtlasTime(controller, timeMa, abort.signal);
+				const current = (): boolean => {
+					const state = atlasStates.get(layerId);
+					return atlasControllers.get(layerId) === controller && atlasLoads.get(layerId) === owner &&
+						projectSession.getLayer(layerId)?.sourceRef === sourceRef && !atlasRemovals.has(layerId) &&
+						state?.requestedAgeMa === timeMa && (result.status === "hidden"
+							? state.status === "hidden" && state.reason === result.reason && (result.reason === "out-of-range" || !projectSession.getEffectiveLayerVisibility(layerId))
+							: state.status === "ready" && controller?.getCommittedFrame()?.sourceId === result.sourceId);
+				};
+				// Hidden/out-of-range standalone Atlas requests do not themselves wait
+				// for rendering. The layer.add completion still needs an absence frame.
+				if (result.status === "hidden") await waitForPointLayerFrame(viewer, undefined, { signal: abort.signal, timeMa, show: false, isCurrent: current });
+				if (abort.signal.aborted || manifestAbort.signal.aborted) throw new OperationInterruptedError("cancelled");
+				if (!current()) throw new OperationInterruptedError("superseded");
+			} catch (error) {
+				if (atlasLoads.get(layerId) !== owner) throw error;
+				let failure = error;
+				controller ??= atlasControllers.get(layerId);
+				if (controller) {
+					try { await releaseAtlasController(layerId, controller); }
+					catch (cleanup) { failure = new AggregateError([error, cleanup], "Atlas loading and cleanup failed; retry removal."); }
+				}
+				atlasErrors.set(layerId, "Atlas loading failed; inspect diagnostics or retry removal.");
+				if (layerId === RUNTIME_LAYER_IDS.atlas) {
+					atlasStatus.dataset.state = "error";
+					atlasStatus.textContent = "Stored Atlas source could not be loaded. Reload after checking its source.";
+				}
+				agentActions.diagnostics.record({ level: "error", category: "asset", event: "atlas.load-failed", outcome: "failed", error: failure }, { layerId });
+				throw failure;
+			} finally {
+				signal?.removeEventListener("abort", forward);
+				if (atlasLoads.get(layerId) === owner) atlasLoads.delete(layerId);
+				publishAtlasState();
+			}
+		})();
+		return owner.promise;
+	};
+	const removeAtlasInstance = (layerId: number, cancelledLoad = false): Promise<void> => {
+		const pending = atlasRemovals.get(layerId);
+		if (pending) return pending;
+		invalidateActiveTimeLayers?.();
+		const removal = Promise.resolve().then(async () => {
+			const loading = atlasLoads.get(layerId);
+			if (loading) { loading.abort.abort(new OperationInterruptedError("superseded")); await loading.promise.catch(() => undefined); }
+			await releaseAtlasController(layerId, atlasControllers.get(layerId));
+			if (cancelledLoad) atlasErrors.set(layerId, "Atlas loading was cancelled after its frame; resources were released.");
+			else atlasErrors.delete(layerId);
+		}).catch(error => {
+			atlasErrors.set(layerId, "Atlas cleanup failed; retry removal.");
+			throw error;
+		}).finally(() => { atlasRemovals.delete(layerId); publishAtlasState(); });
+		atlasRemovals.set(layerId, removal);
+		publishAtlasState();
+		return removal;
+	};
+	const publishRasterState = (): void => {
+		for (const id of rasterRemovalRequested) if (!projectSession.getLayer(id)) rasterRemovalRequested.delete(id);
+		const error = rasterErrors.get(RUNTIME_LAYER_IDS.raster);
+		if (error) {
+			singleRasterState.textContent = "失败";
+			singleRasterState.dataset.state = "error";
+			singleRasterStatus.dataset.state = "error";
+			singleRasterStatus.textContent = error;
+			const raster = rasterControllers.get(RUNTIME_LAYER_IDS.raster)?.getCommittedRaster();
+			singleRasterStatus.dataset.rasterId = raster?.id ?? "";
+			if (raster) updateSingleRasterLegend(raster); else singleRasterLegend.hidden = true;
+		}
+		applyLayerState();
+		projectionController?.refreshCapabilities();
+		agentActions.notifyStateChanged("layers");
+		agentActions.notifyStateChanged("raster");
+	};
+	const validateRasterSelection = (layerId: number, rasterId: string): void => {
+		const layer = projectSession.getLayer(layerId);
+		if (!layer || layer.type !== ProjectLayerType.Raster) throw new AgentActionValidationError("An existing Raster layer is required.");
+		if (layer.sourceRef !== SINGLE_RASTER_SOURCE) throw new AgentActionUnsupportedError("This raster source is not implemented; no default source is substituted.");
+		if (!rasterManifest) throw new AgentActionUnsupportedError("The raster manifest is not available.");
+		if (!rasterManifest.rasters.some(entry => entry.id === rasterId)) throw new AgentActionValidationError(`Unknown raster "${rasterId}".`);
+	};
+	const ensureRasterController = (layerId: number): SingleRasterLayerController => {
+		const existing = rasterControllers.get(layerId);
+		if (existing) return existing;
+		if (!rasterManifest) throw new AgentActionUnsupportedError("The raster manifest is not available.");
+		const controller = new SingleRasterLayerController(viewer, rasterManifest, state => {
+			rasterStates.set(layerId, state);
+			if (layerId === RUNTIME_LAYER_IDS.raster) updateSingleRasterState(state);
+			else applyImageryOrder();
+			publishRasterState();
+		}, (error, context) => {
+			agentActions.diagnostics.record({ level: "error", category: "render", event: `raster.${context.phase}-failed`, outcome: "failed",
+				error, errorCode: `RASTER_${error.kind.toUpperCase()}` }, { layerId, generation: context.generation });
+		});
+		rasterControllers.set(layerId, controller);
+		if (layerId === RUNTIME_LAYER_IDS.raster) singleRasterController = controller;
+		controller.setOpacity(projectSession.getEffectiveLayerOpacity(layerId));
+		controller.setVisible(projectSession.getEffectiveLayerVisibility(layerId));
+		return controller;
+	};
+	const releaseRasterController = async (layerId: number, controller: SingleRasterLayerController | undefined): Promise<void> => {
+		try {
+			controller?.destroy();
+			await waitForPointLayerFrame(viewer, undefined, {
+				timeMa: projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa, show: false,
+				isCurrent: () => rasterControllers.get(layerId) === controller,
+			});
+		} catch (error) { rasterCleanupPending.add(layerId); throw error; }
+		rasterCleanupPending.delete(layerId);
+		if (rasterControllers.get(layerId) === controller) rasterControllers.delete(layerId);
+		if (layerId === RUNTIME_LAYER_IDS.raster && singleRasterController === controller) singleRasterController = undefined;
+		rasterStates.delete(layerId);
+	};
+	const loadRasterInstance = (layerId: number, sourceRef: string, signal?: AbortSignal): Promise<void> => {
+		const loading = rasterLoads.get(layerId);
+		if (loading) return loading.promise;
+		const abort = new AbortController();
+		const owner = { abort, promise: Promise.resolve() as Promise<void> };
+		const forward = (): void => abort.abort(signal?.reason);
+		signal?.addEventListener("abort", forward, { once: true });
+		if (signal?.aborted) forward();
+		rasterLoads.set(layerId, owner);
+		rasterErrors.delete(layerId);
+		owner.promise = (async () => {
+			let controller: SingleRasterLayerController | undefined;
+			try {
+				if (abort.signal.aborted || manifestAbort.signal.aborted) throw new OperationInterruptedError("cancelled");
+				if (sourceRef !== SINGLE_RASTER_SOURCE) throw new AgentActionUnsupportedError("The stored raster source is not implemented.");
+				const rasterId = projectSession.getRasterId(layerId) ?? rasterManifest?.defaultRasterId;
+				validateRasterSelection(layerId, rasterId!);
+				invalidateActiveTimeLayers?.();
+				controller = ensureRasterController(layerId);
+				if (layerId === RUNTIME_LAYER_IDS.raster) singleRasterSelect.value = rasterId!;
+				await executeRasterSelection(controller, rasterId!, abort.signal);
+				if (abort.signal.aborted || manifestAbort.signal.aborted) throw new OperationInterruptedError("cancelled");
+				if (rasterLoads.get(layerId) !== owner || !projectSession.getLayer(layerId)) throw new OperationInterruptedError("superseded");
+				projectSession.setRasterId(layerId, rasterId!);
+				persistLayerEdit();
+			} catch (error) {
+				if (rasterLoads.get(layerId) !== owner) throw error;
+				let failure = error;
+				controller ??= rasterControllers.get(layerId);
+				if (controller) {
+					try { await releaseRasterController(layerId, controller); }
+					catch (cleanup) { failure = new AggregateError([error, cleanup], "Raster loading and cleanup failed; retry removal."); }
+				}
+				rasterErrors.set(layerId, "Raster loading failed; inspect diagnostics or retry removal.");
+				if (layerId === RUNTIME_LAYER_IDS.raster) {
+					singleRasterState.textContent = "失败";
+					singleRasterState.dataset.state = "error";
+					singleRasterStatus.textContent = "Stored raster selection could not be loaded. Choose an available raster to retry.";
+				}
+				agentActions.diagnostics.record({ level: "error", category: "asset", event: "raster.load-failed", outcome: "failed", error: failure }, { layerId });
+				throw failure;
+			} finally {
+				signal?.removeEventListener("abort", forward);
+				if (rasterLoads.get(layerId) === owner) rasterLoads.delete(layerId);
+				publishRasterState();
+			}
+		})();
+		return owner.promise;
+	};
+	const removeRasterInstance = (layerId: number, cancelledLoad = false): Promise<void> => {
+		if (layerId !== RUNTIME_LAYER_IDS.raster) rasterRemovalRequested.add(layerId);
+		const pending = rasterRemovals.get(layerId);
+		if (pending) return pending;
+		invalidateActiveTimeLayers?.();
+		rasterSelectionGenerations.set(layerId, (rasterSelectionGenerations.get(layerId) ?? 0) + 1);
+		// Defer to a microtask so reentrant state observers see the removal owner.
+		const removal = Promise.resolve().then(async () => {
+			const loading = rasterLoads.get(layerId);
+			if (loading) { loading.abort.abort(new OperationInterruptedError("superseded")); await loading.promise.catch(() => undefined); }
+			await releaseRasterController(layerId, rasterControllers.get(layerId));
+			if (cancelledLoad) rasterErrors.set(layerId, "Raster loading was cancelled after its frame; resources were released.");
+			else rasterErrors.delete(layerId);
+		}).catch(error => {
+			rasterErrors.set(layerId, "Raster cleanup failed; retry removal.");
+			throw error;
+		}).finally(() => { rasterRemovals.delete(layerId); publishRasterState(); });
+		rasterRemovals.set(layerId, removal);
+		publishRasterState();
+		return removal;
+	};
+	const publishNativePointState = (): void => {
+		reconcileFeatureSelection();
+		applyLayerState();
+		projectionController?.refreshCapabilities();
+		agentActions.notifyStateChanged("layers");
+	};
+	nativePointRuntime = new NativePointLayerRuntime(viewer, {
+		readEffectiveState: id => projectSession.getLayer(id) ? {
+			visible: projectSession.getEffectiveLayerVisibility(id),
+			opacity: projectSession.getEffectiveLayerOpacity(id),
+			style: projectSession.getLayer(id)?.type === ProjectLayerType.Polygon
+				? readNativePolygonStyle(projectSession.getLayer(id)?.polygonStyle)
+				: projectSession.getLayer(id)?.type === ProjectLayerType.Line
+					? readNativeLineStyle(projectSession.getLayer(id)?.lineStyle)
+					: readNativePointStyle(projectSession.getLayer(id)?.pointStyle),
+		} : undefined,
+		onStateChange: publishNativePointState,
+		onDiagnostic: (error, context) => {
+			agentActions.diagnostics.record({
+				level: "error", category: "render", event: `native-vectors.${context.phase}-failed`, outcome: "failed", error,
+			}, { layerId: context.layerId, featureId: context.featureId });
+		},
+	});
+	const assertNativePointAddAllowed = (_input: Pick<LayerInstanceInput, "type"> & { rasterId?: unknown }): void => {
+		projectionController?.assertGlobeRuntimeAvailable();
+		const state = projectionController?.getSnapshot();
+		if (!state || state.status === "preparing" || state.requestedId !== "globe" || state.committedId !== "globe") {
+			throw new AgentActionUnsupportedError("Native vector instance creation currently requires a committed Globe view. Its other projection paths are not implemented yet.");
+		}
+		if (_input.type === ProjectLayerType.Raster) {
+			if (!rasterManifest) throw new AgentActionUnsupportedError("Wait for the raster manifest before adding a raster instance.");
+			const id = _input.rasterId ?? rasterManifest.defaultRasterId;
+			if (!rasterManifest.rasters.some(entry => entry.id === id)) throw new AgentActionValidationError(`Unknown raster "${id}".`);
+		}
+		if (_input.type === ProjectLayerType.Atlas && !atlasManifest) throw new AgentActionUnsupportedError("Wait for the Atlas manifest before adding an Atlas instance.");
+	};
+	const loadNativePointInstance = (layerId: number, sourceRef: string, signal?: AbortSignal): Promise<void> => {
+		const abort = new AbortController();
+		const owner = { abort, promise: Promise.resolve() as Promise<void>, sourceRef };
+		const forwardAbort = (): void => abort.abort(signal?.reason);
+		signal?.addEventListener("abort", forwardAbort, { once: true });
+		if (signal?.aborted) forwardAbort();
+		nativePointSourceErrors.delete(layerId);
+		nativePointSourceLoads.set(layerId, owner);
+		nativeSelectionOwners.set(layerId, owner);
+		publishNativePointState();
+		owner.promise = (async () => {
+			try {
+				const source = await loadSyntheticVectorSource(sourceRef, abort.signal);
+				if (manifestAbort.signal.aborted || abort.signal.aborted) throw abort.signal.reason instanceof OperationInterruptedError
+					? abort.signal.reason : new OperationInterruptedError("cancelled");
+				if (!projectSession.getLayer(layerId) || nativePointSourceLoads.get(layerId) !== owner) throw new OperationInterruptedError("superseded");
+				const expectedType = source.kind === "polygon" ? ProjectLayerType.Polygon : source.kind === "line" ? ProjectLayerType.Line : ProjectLayerType.Point;
+				if (projectSession.getLayer(layerId)!.type !== expectedType) throw new AgentActionUnsupportedError("The stored vector layer type does not match its source geometry.");
+				await nativePointRuntime!.add(layerId, source, abort.signal);
+			} catch (error) {
+				if (projectSession.getLayer(layerId)) nativePointSourceErrors.set(layerId,
+					error instanceof OperationInterruptedError ? "Vector layer loading was cancelled or superseded." : "Vector layer loading failed. Inspect diagnostics for details.");
+				agentActions.diagnostics.record({ level: "error", category: "asset", event: "native-vectors.load-failed", outcome: "failed", error }, { layerId });
+				throw error;
+			} finally {
+				signal?.removeEventListener("abort", forwardAbort);
+				if (nativePointSourceLoads.get(layerId) === owner) nativePointSourceLoads.delete(layerId);
+				publishNativePointState();
+			}
+		})();
+		return owner.promise;
+	};
+	const removeNativePointInstance = async (layerId: number, cancelledLoad = false): Promise<void> => {
+		const pending = nativePointSourceLoads.get(layerId);
+		if (pending) {
+			pending.abort.abort(new OperationInterruptedError("superseded"));
+			await pending.promise.catch(() => undefined);
+		}
+		if (nativePointRuntime?.get(layerId)) await nativePointRuntime.remove(layerId);
+		else await waitForPointLayerFrame(viewer, undefined, {
+			timeMa: projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa,
+			show: false,
+			isCurrent: () => !nativePointRuntime?.get(layerId) && !nativePointSourceLoads.has(layerId),
+		});
+		if (cancelledLoad) nativePointSourceErrors.set(layerId, "Vector layer loading was cancelled after its frame. Its resources have been released.");
+		else nativePointSourceErrors.delete(layerId);
+		nativeSelectionOwners.delete(layerId);
+		publishNativePointState();
+	};
+	const retryLayerInstance = async (layerId: number, signal?: AbortSignal): Promise<void> => {
+		const layer = projectSession.getLayer(layerId);
+		if (!layer) throw new AgentActionValidationError(`Unknown layer ${layerId}.`);
+		assertNativePointAddAllowed(layer);
+		if (atlasLoads.has(layerId) || rasterLoads.has(layerId) || nativePointSourceLoads.has(layerId) ||
+			atlasRemovals.has(layerId) || rasterRemovals.has(layerId) || rasterSelectionOwners.has(layerId) ||
+			nativePointRuntime?.get(layerId)?.runtimeStatus === "removing") {
+			throw new AgentActionBusyError("Wait for this layer's current operation to finish before retrying.");
+		}
+		if (instanceRuntimeState(layerId).runtimeStatus !== "error") throw new AgentActionValidationError("Only a failed layer can be retried.");
+		if (signal?.aborted) throw new OperationInterruptedError("cancelled");
+		invalidateActiveTimeLayers?.();
+		const remove = layer.type === ProjectLayerType.Raster ? removeRasterInstance
+			: layer.type === ProjectLayerType.Atlas ? removeAtlasInstance : removeNativePointInstance;
+		const load = layer.type === ProjectLayerType.Raster ? loadRasterInstance
+			: layer.type === ProjectLayerType.Atlas ? loadAtlasInstance : loadNativePointInstance;
+		// Retain an explicit failed record during the gap between cleanup and
+		// replacement. Cancellation here must not appear as a successful unload.
+		await remove(layerId, true);
+		if (signal?.aborted) throw new OperationInterruptedError("cancelled");
+		assertNativePointAddAllowed(layer);
+		// The action owns the retry lock until late cancellation cleanup finishes;
+		// neither layer.remove nor raster.select can resurrect this removal intent.
+		if (layer.type === ProjectLayerType.Raster) rasterRemovalRequested.delete(layerId);
+		await load(layerId, layer.sourceRef, signal);
 	};
 
 	/**
@@ -1669,15 +2599,27 @@ async function main(): Promise<void> {
 	};
 
 	const applyLayerRuntimeState = (id: number): void => {
+		invalidateActiveTimeLayers?.();
 		const visible = projectSession.getEffectiveLayerVisibility(id);
 		const opacity = projectSession.getEffectiveLayerOpacity(id);
-		if (id === RUNTIME_LAYER_IDS.atlas) {
-			atlasController?.setVisible(visible);
-			atlasController?.setOpacity(opacity);
-		} else if (id === RUNTIME_LAYER_IDS.raster) {
-			singleRasterController?.setVisible(visible);
-			singleRasterController?.setOpacity(opacity);
+		if (nativePointRuntime?.get(id)) {
+			nativePointRuntime.apply(id);
+		} else if (projectSession.getLayer(id)?.type === ProjectLayerType.Atlas) {
+			const controller = atlasControllers.get(id);
+			if (atlasRemovals.has(id) || atlasCleanupPending.has(id)) return;
+			controller?.setVisible(visible);
+			controller?.setOpacity(opacity);
+			const timeMa = projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa;
+			if (visible && atlasStates.get(id)?.requestedAgeMa !== timeMa) controller?.setTime(timeMa);
+		} else if (projectSession.getLayer(id)?.type === ProjectLayerType.Raster) {
+			const controller = rasterControllers.get(id);
+			controller?.setVisible(visible);
+			controller?.setOpacity(opacity);
 		} else if (id === RUNTIME_LAYER_IDS.points) {
+			if (visible && projectionController?.activeMode === "globe") {
+				const frame = readCommittedPointFrame();
+				pointRenderer?.setTime(frame.timeMa, frame.rotationMap);
+			}
 			// Style too, not just visibility/opacity: the stored pointStyle is the
 			// single source of truth for what the GPU draws.
 			applyPointRuntimeState(
@@ -1689,8 +2631,8 @@ async function main(): Promise<void> {
 		} else if (id === RUNTIME_LAYER_IDS.plateModel) {
 			renderer.setPlateGeometryVisible(visible);
 			renderer.setPlateGeometryOpacity(opacity);
-			if (projectionController?.activeMode === "rectangle") {
-				// Rectangle style path: setPlateGeometry* already synced the committed
+			if (projectionController?.activeMode !== "globe") {
+				// Flat style path: setPlateGeometry* already synced the committed
 				// rectangle frame. Running the globe updateTime here would re-show the
 				// hidden globe bundles (two copies of the plates), so the time state is
 				// refreshed for the committed rectangle age instead.
@@ -1698,12 +2640,8 @@ async function main(): Promise<void> {
 				updateInspector();
 			} else {
 				currentTimeState = renderer.updateTime(
-					timeline.currentAgeMa,
+					appliedGlobeTimeMa,
 					rotationModel
-				);
-				pointRenderer?.setTime(
-					timeline.currentAgeMa,
-					currentTimeState.rotationMap
 				);
 			}
 		}
@@ -1714,6 +2652,7 @@ async function main(): Promise<void> {
 		applyRuntime: applyLayerRuntimeState,
 		persist: persistLayerEdit,
 		publishState: () => {
+			reconcileFeatureSelection();
 			applyLayerState();
 			// Every layer/group/order mutation lands here, and each one can flip a
 			// rectangle-incompatible layer's effective visibility. Republishing the
@@ -1723,6 +2662,7 @@ async function main(): Promise<void> {
 			// the ProjectionController is constructed, so it never touches the
 			// controller binding before initialization.
 			projectionController?.refreshCapabilities();
+			agentActions.notifyStateChanged("layers");
 		},
 		syncNativeControls,
 	});
@@ -1827,31 +2767,35 @@ async function main(): Promise<void> {
 	 * automated caller can never diverge.
 	 */
 	const saveProjectToCloud = async (): Promise<AgentActionOutcome> => {
+		if (cloudSaveState.status === "saving") throw new AgentActionBusyError("A cloud save is already running.");
 		requireV2Workspace(
 			phase1BCloudClient.snapshot.v2WorkspaceAvailable,
 			"cloud projects",
 		);
 		window.clearTimeout(cloudAutosaveTimer);
-		captureProjectState();
-		const snapshot = projectSession.save(window.localStorage);
-		const document = projectSession.toDocument();
-		const cloudReference = await phase1BCloudClient.saveProject(document);
-		window.dispatchEvent(
-			new CustomEvent("timemachine:project-saved", {
-				detail: {
-					document,
-					message: `Cloud revision ${cloudReference.revisionNumber} saved at ${new Date(
-						snapshot.savedAt,
-					).toLocaleTimeString()}.`,
-				},
-			})
-		);
-		return {
-			data: {
-				revisionId: cloudReference.revisionId,
-				revisionNumber: cloudReference.revisionNumber,
-			},
-		};
+		try {
+			const snapshot = localProjectActions.saveLocal();
+			const document = projectSession.toDocument();
+			cloudSaveState = { status: "saving", revision: snapshot.revision };
+			publishProjectState();
+			const cloudReference = await phase1BCloudClient.saveProject(document);
+			cloudSaveState = { status: "saved", revision: snapshot.revision,
+				revisionId: cloudReference.revisionId, revisionNumber: cloudReference.revisionNumber };
+			window.dispatchEvent(new CustomEvent("timemachine:project-saved", { detail: {
+				message: `Cloud revision ${cloudReference.revisionNumber} saved at ${new Date(snapshot.savedAt).toLocaleTimeString()}.`,
+			} }));
+			return { data: { revisionId: cloudReference.revisionId, revisionNumber: cloudReference.revisionNumber } };
+		} catch (error) {
+			cloudSaveState = error instanceof CloudProjectSaveError
+				? { ...cloudSaveState, status: "error", remoteCommitted: true,
+					revisionId: error.reference.revisionId, revisionNumber: error.reference.revisionNumber,
+					message: error.phase === "local-reference"
+						? `Cloud revision ${error.reference.revisionNumber} was saved. Its local reference could not be stored; open that revision before saving again.`
+						: `Cloud revision ${error.reference.revisionNumber} was saved. Refresh the workspace catalog to view it.` }
+				: { status: "error", revision: projectSession.localSaveState.revision,
+					message: "Cloud save failed. Current edits remain available; inspect the operation error for details." };
+			throw error;
+		} finally { publishProjectState(); }
 	};
 
 	window.addEventListener("timemachine:project-save-request", () => {
@@ -1877,270 +2821,307 @@ async function main(): Promise<void> {
 		pointJsHeap.textContent = "—";
 	};
 
-	const releasePointRenderer = (
-		rendererToRelease: GpuPointRenderer | undefined,
-	): void => {
-		if (!rendererToRelease) {
-			return;
-		}
-		rendererToRelease.setShow(false);
-		viewer.scene.requestRender();
-		window.requestAnimationFrame(() => {
-			const destroy = (): void => rendererToRelease.destroy();
-			const requestIdle = (
-				window as Window & {
-					requestIdleCallback?: typeof window.requestIdleCallback;
-				}
-			).requestIdleCallback;
-			if (requestIdle) {
-				requestIdle(destroy, { timeout: 240 });
-			} else {
-				globalThis.setTimeout(destroy, 0);
-			}
-		});
-	};
-
-	const unloadPointDataset = (): void => {
-		pointLoadGeneration += 1;
+	function reportPointCleanupError(error: unknown): void {
+		agentActions.diagnostics.record({ level: "error", category: "app", event: "points.cleanup-failed", outcome: "failed", error });
+	}
+	function releasePointResources(resources: PointReleaseResources): boolean {
+		pointResourcesToRelease.add(resources);
+		const released = disposePointLayer(resources, reportPointCleanupError);
+		if (released) pointResourcesToRelease.delete(resources);
+		return released;
+	}
+	function clearPointRuntime(): boolean {
 		pointPickGeneration += 1;
-		pointLoadInFlight = false;
-		pointLoadAbortController?.abort();
-		pointLoadAbortController = undefined;
-		pointPicker?.destroy();
+		if (pointRenderer || pointPicker) pointResourcesToRelease.add({ renderer: pointRenderer, picker: pointPicker });
+		pointRenderer = undefined;
 		pointPicker = undefined;
 		loadedPointDataset = undefined;
-		if (selectedPointRecord) {
-			selectedPointRecord = undefined;
-			inspectorContent.hidden = true;
-			inspectorEmpty.hidden = false;
-		}
-		const retiringRenderer = pointRenderer;
-		pointRenderer = undefined;
-		releasePointRenderer(retiringRenderer);
 		loadedPointEntry = undefined;
+		reconcileFeatureSelection();
+		for (const resources of [...pointResourcesToRelease]) releasePointResources(resources);
+		const released = !hasPendingPointRelease();
+		if (!viewer.scene.isDestroyed()) viewer.scene.requestRender();
+		return released;
+	}
+
+	const unloadPointDataset = (): boolean => {
+		cancelPointLoad();
+		const released = clearPointRuntime();
 		performanceMonitor.resetFrameSamples();
 		clearPointMetrics();
-		unloadPointsButton.disabled = true;
+		unloadPointsButton.disabled = released || pointDisposed;
+		loadPointsButton.disabled = !released || !pointManifestRef || pointDisposed;
+		pointDatasetSelect.disabled = !pointManifestRef || pointDisposed;
 		setPointPanelState(
-			"ready",
-			"未加载",
-			retiringRenderer
-				? "点图层已隐藏；GPU 缓冲区将在下一 idle 阶段释放。"
-				: "当前没有已加载的点数据。",
+			released ? "ready" : "error",
+			released ? "未加载" : "释放失败",
+			released ? "点数据加载已取消，已有点图层资源已释放。" : "部分点资源释放失败，请再次卸载以重试；详情见诊断日志。",
 		);
+		return released;
 	};
 	unloadPointsButton.addEventListener("click", unloadPointDataset);
-
-	// Ensure the first per-instance attribute update happens after Primitive.update.
-	let removeInitialPostRenderListener = (): void => {};
-	removeInitialPostRenderListener = viewer.scene.postRender.addEventListener(
-		() => {
-			currentTimeState = renderer.updateTime(
-				timeline.currentAgeMa,
-				rotationModel
-		);
-			removeInitialPostRenderListener();
-		},
-	);
 
 	// Assigned once the point manifest resolves, so the action facade can select a
 	// dataset by id without touching the DOM.
 	let pointManifestRef: PointFixtureManifest | undefined;
-	let loadSelectedPointDataset: (() => Promise<void>) | undefined;
-	let pointLoadInFlight = false;
-	try {
-		const pointManifest = await pointManifestPromise;
-		pointManifestRef = pointManifest;
-		if (
-			pointManifest.format.magic !== "WGP1" ||
-			pointManifest.format.recordStrideBytes !== 20 ||
-			pointManifest.datasets.length === 0
-		) {
-			throw new Error("点数据清单格式不受支持。");
-		}
-		pointDatasetSelect.replaceChildren(
-			...pointManifest.datasets.map((entry) => {
-				const option = document.createElement("option");
-				option.value = entry.id;
-				option.textContent = `${entry.label} · ${entry.pointCount.toLocaleString()} points`;
-				return option;
-			}),
-		);
-		pointDatasetSelect.disabled = false;
-		loadPointsButton.disabled = false;
-		const validityLabel =
-			pointManifest.validityPolicy === "permanent_0_1100_ma"
-				? "0–1100 Ma 常驻"
-				: "按来源年龄过滤";
-		setPointPanelState(
-			"ready",
-			"可测试",
-			`已准备 ${pointManifest.datasets.length} 组${validityLabel}数据；真实 PBDB ${pointManifest.basePointCount.toLocaleString()} 点。`,
-		);
-
-		loadSelectedPointDataset = async (): Promise<void> => {
-			const selectedEntry = pointManifest.datasets.find(
-				(entry) => entry.id === pointDatasetSelect.value
-		);
-			if (!selectedEntry) {
-				return;
+	let loadSelectedPointDataset: ((signal?: AbortSignal) => Promise<void>) | undefined;
+	const initializePoints = async (): Promise<void> => {
+		try {
+			const result = await pointManifestPromise;
+			if (manifestAbort.signal.aborted) return;
+			if (!result.ok) throw result.error;
+			const pointManifest = result.value;
+			if (
+				pointManifest.format.magic !== "WGP1" ||
+				pointManifest.format.recordStrideBytes !== 20 ||
+				pointManifest.datasets.length === 0
+			) {
+				throw new Error("点数据清单格式不受支持。");
 			}
-
-			const generation = ++pointLoadGeneration;
-			pointPickGeneration += 1;
-			pointLoadInFlight = true;
-			pointLoadAbortController?.abort();
-			const abortController = new AbortController();
-			pointLoadAbortController = abortController;
-			const retiringRenderer = pointRenderer;
-			pointRenderer = undefined;
-			pointPicker?.destroy();
-			pointPicker = undefined;
-			loadedPointDataset = undefined;
-			releasePointRenderer(retiringRenderer);
-			loadedPointEntry = undefined;
-			unloadPointsButton.disabled = true;
-			loadPointsButton.disabled = true;
-			pointDatasetSelect.disabled = true;
-			performanceMonitor.resetFrameSamples();
-			clearPointMetrics();
-			pointCount.textContent = selectedEntry.pointCount.toLocaleString();
-			pointMemory.textContent = `${formatBytes(selectedEntry.byteLength)} / —`;
+			pointManifestRef = pointManifest;
+			pointDatasetSelect.replaceChildren(
+				...pointManifest.datasets.map((entry) => {
+					const option = document.createElement("option");
+					option.value = entry.id;
+					option.textContent = `${entry.label} · ${entry.pointCount.toLocaleString()} points`;
+					return option;
+				}),
+			);
+			pointDatasetSelect.disabled = false;
+			loadPointsButton.disabled = false;
+			const validityLabel =
+				pointManifest.validityPolicy === "permanent_0_1100_ma"
+					? "0–1100 Ma 常驻"
+					: "按来源年龄过滤";
 			setPointPanelState(
-				"busy",
-				"加载中",
-				`Worker 正在读取 ${selectedEntry.label}，主线程仍可操作时间轴…`
-		);
+				"ready",
+				"可测试",
+				`已准备 ${pointManifest.datasets.length} 组${validityLabel}数据；真实 PBDB ${pointManifest.basePointCount.toLocaleString()} 点。`,
+			);
 
-			try {
-				const loaded = await loadPointDataset(
-					selectedEntry.id,
-					await resolvePointDatasetUrl(
-						selectedEntry.url,
-						DATA_URLS.pointManifest,
-						DATA_URLS.pointManifestAccessToken,
-					),
-					{ signal: abortController.signal },
-				);
-				if (generation !== pointLoadGeneration) {
-					return;
-				}
-				if (loaded.header.pointCount !== selectedEntry.pointCount) {
-					throw new Error(
-						`数据点数 ${loaded.header.pointCount.toLocaleString()} 与清单 ${selectedEntry.pointCount.toLocaleString()} 不一致。`,
-					);
+			loadSelectedPointDataset = async (signal?: AbortSignal): Promise<void> => {
+				assertPointLoadAvailable();
+				if (signal?.aborted) throw new OperationInterruptedError("cancelled");
+				const selectedEntry = pointManifest.datasets.find(
+					(entry) => entry.id === pointDatasetSelect.value
+			);
+				if (!selectedEntry) {
+					throw new AgentActionValidationError("No point dataset is selected.");
 				}
 
+				invalidateActiveTimeLayers?.();
+				const generation = ++pointLoadGeneration;
+				pointPickGeneration += 1;
+				pointLoadInFlight = true;
+				pointLoadAbortController?.abort();
+				const abortController = new AbortController();
+				pointLoadAbortController = abortController;
+				const abort = (): void => abortController.abort(new OperationInterruptedError("cancelled"));
+				signal?.addEventListener("abort", abort, { once: true });
+				const isCurrent = (): boolean => generation === pointLoadGeneration && !pointDisposed;
+				const previous: PointResources = { renderer: pointRenderer, picker: pointPicker };
+				const candidate: PointResources = {};
+				let activated = false;
+				let committed = false;
+				let rollbackError: unknown;
+				const configurePointFrame = (target: GpuPointRenderer) => {
+					const frame = readCommittedPointFrame();
+					target.setTime(frame.timeMa, frame.rotationMap);
+					const style = projectSession.getLayer(RUNTIME_LAYER_IDS.points)?.pointStyle;
+					if (style) target.setStyle(style);
+					else target.setPointSize(Number(pointSize.value));
+					target.setOpacity(projectSession.getEffectiveLayerOpacity(RUNTIME_LAYER_IDS.points));
+					const show = projectSession.getEffectiveLayerVisibility(RUNTIME_LAYER_IDS.points);
+					target.setShow(show);
+					return { timeMa: frame.timeMa, show };
+				};
+				const rollback = (): void => {
+					if (committed) return;
+					if (activated) {
+						activated = false;
+						pointRenderer = previous.renderer;
+						pointPicker = previous.picker;
+						pointPickGeneration += 1;
+						try { if (previous.renderer) configurePointFrame(previous.renderer); }
+						catch (error) { rollbackError = error; reportPointCleanupError(error); }
+					}
+					try { candidate.renderer?.setShow(false); }
+					catch (error) { rollbackError = error; reportPointCleanupError(error); }
+					if (candidate.renderer || candidate.picker) releasePointResources(candidate);
+				};
+				rollbackPointLoad = rollback;
+				let cleanupFailed = false;
+				const reportLoadCleanupError = (error: unknown): void => {
+					cleanupFailed = true;
+					reportPointCleanupError(error);
+					if (generation === pointLoadGeneration && !pointDisposed) {
+						setPointPanelState("error", "释放失败", "点资源清理失败，请查看诊断日志。");
+					}
+				};
+				unloadPointsButton.disabled = false;
+				loadPointsButton.disabled = true;
+				pointDatasetSelect.disabled = true;
+				performanceMonitor.resetFrameSamples();
+				clearPointMetrics();
+				pointCount.textContent = selectedEntry.pointCount.toLocaleString();
+				pointMemory.textContent = `${formatBytes(selectedEntry.byteLength)} / —`;
 				setPointPanelState(
 					"busy",
-					"上传中",
-					"二进制解析完成，正在创建单个 GPU 顶点缓冲区…",
-				);
-				const nextRenderer = await GpuPointRenderer.create(
-					viewer,
-					loaded,
-					timeline.currentAgeMa,
-					currentTimeState.rotationMap,
-				);
-				if (generation !== pointLoadGeneration) {
-					nextRenderer.destroy();
-					return;
-				}
+					"加载中",
+					`Worker 正在读取 ${selectedEntry.label}，确认新图层后再替换已有点数据…`
+			);
 
-				pointRenderer = nextRenderer;
-				loadedPointEntry = selectedEntry;
-				loadedPointDataset = loaded;
-				if (loaded.header.pointCount <= MAX_PICKABLE_POINT_COUNT) {
-					pointPicker = new PointPicker(loaded);
-				}
-				const pointStyle = projectSession.getLayer(
-					RUNTIME_LAYER_IDS.points,
-				)?.pointStyle;
-				if (pointStyle) {
-					pointRenderer.setStyle(pointStyle);
-				} else {
-					pointRenderer.setPointSize(Number(pointSize.value));
-				}
-				pointRenderer.setOpacity(
-					projectSession.getEffectiveLayerOpacity(RUNTIME_LAYER_IDS.points),
-				);
-				pointRenderer.setShow(
-					projectSession.getEffectiveLayerVisibility(RUNTIME_LAYER_IDS.points),
-				);
-				pointCount.textContent = selectedEntry.pointCount.toLocaleString();
-				updateVisiblePointCount(timeline.currentAgeMa);
-				pointMemory.textContent = `${formatBytes(
-					selectedEntry.byteLength,
-				)} / ${formatBytes(nextRenderer.buildStats.gpuVertexBytes)}`;
-				pointLoadTime.textContent = `${formatDuration(loaded.timings.totalMs)}${
-					loaded.timings.cacheHit ? " cache" : ""
-				} / ${formatDuration(nextRenderer.buildStats.uploadMs)}`;
-				unloadPointsButton.disabled = false;
-				const datasetNote =
-					selectedEntry.generation === "deterministic_repeat"
-						? `（${selectedEntry.uniqueSourcePointCount.toLocaleString()} 个真实点确定性复用）`
-						: "";
-				const pickingNote = pointPicker
-					? "点击点可按 row ID 查看属性。"
-					: `超过 ${MAX_PICKABLE_POINT_COUNT.toLocaleString()} 点，拾取等待空间索引。`;
-				setPointPanelState(
-					"ready",
-					"运行中",
-					`${selectedEntry.label} 已加载 ${datasetNote}；${pickingNote}`,
-				);
-			} catch (error) {
-				if (generation !== pointLoadGeneration) {
-					return;
-				}
-				if (error instanceof DOMException && error.name === "AbortError") {
+				try {
+					const { dataset: loaded, renderer: nextRenderer } = await preparePointLayer({
+						viewer,
+						entry: selectedEntry,
+						signal: abortController.signal,
+						resolveUrl: () => resolvePointDatasetUrl(
+							selectedEntry.url,
+							DATA_URLS.pointManifest,
+							DATA_URLS.pointManifestAccessToken,
+						),
+						readCommittedFrame: readCommittedPointFrame,
+						onUploading: () => { if (isCurrent()) setPointPanelState("busy", "上传中", "二进制解析完成，正在创建单个 GPU 顶点缓冲区…"); },
+						onCleanupError: reportLoadCleanupError,
+						onCleanupPending: resource => {
+							pointResourcesToRelease.add({ renderer: resource });
+							if (!pointDisposed) {
+								loadPointsButton.disabled = true;
+								unloadPointsButton.disabled = false;
+								if (!pointLoadInFlight) setPointPanelState("error", "释放失败", "部分点资源释放失败，请卸载以重试；详情见诊断日志。");
+							}
+						},
+						releaseRenderer: renderer => { releasePointResources({ renderer }); },
+					});
+					candidate.renderer = nextRenderer;
+					if (generation !== pointLoadGeneration || pointDisposed || abortController.signal.aborted) {
+						releasePointResources(candidate);
+						throw abortController.signal.reason instanceof OperationInterruptedError
+							? abortController.signal.reason : new OperationInterruptedError("superseded");
+					}
+
+					invalidateActiveTimeLayers?.();
+					activated = true;
+					pointRenderer = nextRenderer;
+					pointPicker = undefined;
+					previous.renderer?.setShow(false);
+					if (loaded.header.pointCount <= MAX_PICKABLE_POINT_COUNT) {
+						candidate.picker = new PointPicker(loaded);
+					}
+					const installFrame = configurePointFrame(nextRenderer);
+					await waitForPointLayerFrame(viewer, nextRenderer, {
+						...installFrame, signal: abortController.signal, isCurrent,
+					});
+					if (!isCurrent() || abortController.signal.aborted || !nextRenderer.matchesFrameState(installFrame.timeMa, installFrame.show)) {
+						throw abortController.signal.reason instanceof OperationInterruptedError
+							? abortController.signal.reason : new OperationInterruptedError("superseded");
+					}
+					// The previous source stays authoritative until the candidate's
+					// actual native frame succeeds. Retirement is after this commit.
+					committed = true;
+					rollbackPointLoad = undefined;
+					loadedPointEntry = selectedEntry;
+					loadedPointDataset = loaded;
+					pointPicker = candidate.picker;
+					reconcileFeatureSelection();
+					releasePointResources(previous);
+					pointCount.textContent = selectedEntry.pointCount.toLocaleString();
+					updateVisiblePointCount(projectionController?.getSnapshot().committedTimeMa ?? initialAgeMa);
+					pointMemory.textContent = `${formatBytes(
+						selectedEntry.byteLength,
+					)} / ${formatBytes(nextRenderer.buildStats.gpuVertexBytes)}`;
+					pointLoadTime.textContent = `${formatDuration(loaded.timings.totalMs)}${
+						loaded.timings.cacheHit ? " cache" : ""
+					} / ${formatDuration(nextRenderer.buildStats.uploadMs)}`;
+					unloadPointsButton.disabled = false;
+					const datasetNote =
+						selectedEntry.generation === "deterministic_repeat"
+							? `（${selectedEntry.uniqueSourcePointCount.toLocaleString()} 个真实点确定性复用）`
+							: "";
+					const pickingNote = pointPicker
+						? "点击点可按 row ID 查看属性。"
+						: `超过 ${MAX_PICKABLE_POINT_COUNT.toLocaleString()} 点，拾取等待空间索引。`;
 					setPointPanelState(
 						"ready",
-						"已取消",
-						"点数据请求已取消，没有创建 GPU 缓冲区。",
+						"运行中",
+						`${selectedEntry.label} 已加载 ${datasetNote}；${pickingNote}`,
 					);
-					return;
+				} catch (error) {
+					if (generation !== pointLoadGeneration) {
+						throw abortController.signal.reason instanceof OperationInterruptedError
+							? abortController.signal.reason : new OperationInterruptedError("superseded");
+					}
+					const needsRecoveryFrame = activated;
+					rollback();
+					if (needsRecoveryFrame && isCurrent() && !rollbackError) {
+						try {
+							const recoveryFrame = previous.renderer ? configurePointFrame(previous.renderer)
+								: { timeMa: readCommittedPointFrame().timeMa, show: false };
+							await waitForPointLayerFrame(viewer, previous.renderer, {
+								...recoveryFrame, isCurrent: () => isCurrent() && pointRenderer === previous.renderer,
+							});
+						} catch (recoveryError) { rollbackError = recoveryError; }
+					}
+					if (!isCurrent()) throw new OperationInterruptedError("superseded");
+					cleanupFailed = hasPendingPointRelease() || cleanupFailed;
+					if (rollbackError) {
+						setPointPanelState("error", "恢复失败", "旧点图层未能确认恢复，详情见诊断日志；可卸载后重试。");
+						throw new AggregateError([error, rollbackError], "Point layer replacement and recovery failed.");
+					}
+					if (error instanceof OperationInterruptedError || (error instanceof DOMException && error.name === "AbortError")) {
+						setPointPanelState(
+							cleanupFailed ? "error" : "ready",
+							cleanupFailed ? "释放失败" : "已取消",
+							cleanupFailed ? "加载已取消，但部分点资源清理失败，请查看诊断日志。" : "点数据加载已取消。",
+						);
+						throw error instanceof OperationInterruptedError ? error : new OperationInterruptedError("cancelled");
+					}
+					setPointPanelState(
+						"error",
+						"失败",
+						error instanceof Error ? error.message : String(error),
+					);
+					// Re-raised so an automated caller sees the failure instead of a
+						// success; the panel above is the human-readable form of it.
+					throw error;
+				} finally {
+					signal?.removeEventListener("abort", abort);
+					if (generation === pointLoadGeneration) {
+						rollbackPointLoad = undefined;
+						pointLoadAbortController = undefined;
+						pointLoadInFlight = false;
+						unloadPointsButton.disabled = !loadedPointEntry && !hasPendingPointRelease();
+						loadPointsButton.disabled = hasPendingPointRelease();
+						pointDatasetSelect.disabled = false;
+						agentActions.notifyStateChanged("points");
+					}
 				}
-				pointRenderer?.destroy();
-				pointRenderer = undefined;
-				pointPicker?.destroy();
-				pointPicker = undefined;
-				loadedPointDataset = undefined;
-				loadedPointEntry = undefined;
-				setPointPanelState(
-					"error",
-					"失败",
-					error instanceof Error ? error.message : String(error),
-				);
-				// Re-raised so an automated caller sees the failure instead of a
-					// success; the panel above is the human-readable form of it.
-				throw error;
-			} finally {
-				if (generation === pointLoadGeneration) {
-					pointLoadAbortController = undefined;
-					pointLoadInFlight = false;
-					loadPointsButton.disabled = false;
-					pointDatasetSelect.disabled = false;
-				}
+			};
+			loadPointsButton.addEventListener("click", () => {
+				// The load owner publishes its panel state. An old action's late
+				// cancellation must not overwrite a replacement/unload operation.
+				void agentActions.execute(AGENT_ACTIONS.pointsLoad);
+			});
+			manifestStatus.points = "ready";
+		} catch (error) {
+			if (manifestAbort.signal.aborted) return;
+			manifestStatus.points = "error";
+			reportManifestFailure("points", error);
+			pointDatasetSelect.disabled = true;
+			loadPointsButton.disabled = true;
+			setPointPanelState(
+				"error",
+				"数据缺失",
+				error instanceof Error ? error.message : String(error),
+			);
+		} finally {
+			if (!manifestAbort.signal.aborted) {
+				agentActions.notifyStateChanged("startupResources");
+				agentActions.notifyStateChanged("points");
 			}
-		};
-		loadPointsButton.addEventListener("click", () => {
-			void (async () => {
-				try {
-					await loadSelectedPointDataset?.();
-				} catch {
-					// The panel already reports the failure; nothing to re-throw here.
-				}
-			})();
-		});
-	} catch (error) {
-		pointDatasetSelect.disabled = true;
-		loadPointsButton.disabled = true;
-		setPointPanelState(
-			"error",
-			"数据缺失",
-			error instanceof Error ? error.message : String(error),
-		);
-	}
+		}
+	};
 
 	window.setInterval(() => {
 		if (!pointRenderer) {
@@ -2168,6 +3149,33 @@ async function main(): Promise<void> {
 	// defined once. Nothing here synthesizes DOM clicks.
 	// ---------------------------------------------------------------------------
 	const registerRenderAgentActions = (): void => {
+		registerSelectionActions(featureSelection!, selectionPorts);
+		registerStateSection("selection", () => ({ ...featureSelection!.snapshot() }));
+		registerLayerStyleAction(projectSession, layerController, id => {
+			const state = nativePointRuntime?.get(id);
+			if (state?.cleanupPending || state?.runtimeStatus === "removing") {
+				throw new AgentActionBusyError("Finish or retry point layer removal before editing its style.");
+			}
+		});
+		const layerInstanceActions = registerLayerInstanceActions(projectSession, {
+			assertCanAdd: assertNativePointAddAllowed,
+			load: (id, sourceRef, signal) => projectSession.getLayer(id)?.type === ProjectLayerType.Raster
+				? loadRasterInstance(id, sourceRef, signal) : projectSession.getLayer(id)?.type === ProjectLayerType.Atlas
+					? loadAtlasInstance(id, sourceRef, signal) : loadNativePointInstance(id, sourceRef, signal),
+			remove: (id, cancelledLoad) => projectSession.getLayer(id)?.type === ProjectLayerType.Raster
+				? removeRasterInstance(id, cancelledLoad) : projectSession.getLayer(id)?.type === ProjectLayerType.Atlas
+					? removeAtlasInstance(id, cancelledLoad) : removeNativePointInstance(id, cancelledLoad),
+			publish: publishNativePointState,
+			persist: persistLayerEdit,
+			retry: retryLayerInstance,
+		});
+		isLayerRetrying = layerInstanceActions.isRetrying;
+		registerLayerGroupActions(projectSession, layerController, (groupId, parentId) => {
+			projectionController?.assertLayerMutationAllowed(
+				projectSession.layerList,
+				projectSession.groupList.map(group => group.id === groupId ? { ...group, parentId } : group),
+			);
+		});
 		const ready = (
 			id: (typeof AGENT_ACTIONS)[keyof typeof AGENT_ACTIONS],
 			handler: Parameters<typeof agentActions.register>[1],
@@ -2177,7 +3185,8 @@ async function main(): Promise<void> {
 
 		ready(
 			AGENT_ACTIONS.timeSet,
-			async (params) => {
+			async (params, context) => {
+				if (context?.signal?.aborted) throw new OperationInterruptedError("cancelled");
 				const ageMa = params.ageMa as number;
 				if (ageMa < timeline.minAgeMa || ageMa > timeline.maxAgeMa) {
 					throw new AgentActionValidationError(
@@ -2187,11 +3196,8 @@ async function main(): Promise<void> {
 				// Pause first, exactly like the slider and quick-age buttons, so a
 					// running animation cannot immediately overwrite the new age.
 				timeline.setPlaying(false);
-				timeline.setAge(ageMa);
-				// Await the real frame through the same latest-request control the UI
-				// uses: in globe this is synchronous, in rectangle it resolves only
-				// after the new frame is prepared, verified and committed - a bare
-				// timeline callback firing is not success.
+				timeline.setAge(ageMa, context?.signal);
+				// The same UI queue now waits for all captured time layers to commit.
 				await timelineFrame;
 				return {
 					data: {
@@ -2229,23 +3235,57 @@ async function main(): Promise<void> {
 				};
 			}
 		);
-		ready(AGENT_ACTIONS.cameraReset, () => {
-			// Mode-aware home: the full map in Rectangle, the globe view otherwise.
-			projectionController?.home();
-			return {};
+		ready(AGENT_ACTIONS.cameraZoom, (params) => {
+			if (!projectionController) throw new AgentActionUnsupportedError("Camera runtime unavailable.");
+			return { data: projectionController.zoom(params.factor) };
+		});
+		ready(AGENT_ACTIONS.cameraPan, (params) => {
+			if (!projectionController) throw new AgentActionUnsupportedError("Camera runtime unavailable.");
+			return { data: projectionController.pan(params.deltaX, params.deltaY) };
+		});
+		for (const id of [AGENT_ACTIONS.cameraZoom, AGENT_ACTIONS.cameraPan]) {
+			agentActions.setAvailability(id, () => {
+				if (!projectionController) return "Camera runtime unavailable.";
+				return projectionController.sceneMode === "globe"
+					? "Programmatic pan/zoom currently support flat projections only."
+					: undefined;
+			});
+		}
+		ready(AGENT_ACTIONS.cameraReset, async (_params, context) => {
+			if (!projectionController) throw new AgentActionUnsupportedError("Camera runtime unavailable.");
+			if (plateModelSourceRef(resolvePlateModelSource(phase1BCloudClient.snapshot.selection)) !== loadedPlateSourceRef) {
+				throw new AgentActionUnsupportedError("Reload the selected plate model before resetting its camera.");
+			}
+			if (projectionController.getSnapshot().status === "preparing") {
+				throw new AgentActionBusyError("Wait for the current view to finish before resetting its camera.");
+			}
+			cancelGlobeMomentum.get(viewer)?.();
+			await cameraResetCompletion.run(callbacks => {
+				if (projectionController!.sceneMode === "globe") setCameraHome(viewer, callbacks);
+				else {
+					projectionController!.home();
+					callbacks.complete();
+				}
+			}, { signal: context?.signal });
+			return { data: { projectionId: projectionController.sceneMode, camera: {
+				position: [viewer.camera.positionWC.x, viewer.camera.positionWC.y, viewer.camera.positionWC.z],
+				direction: [viewer.camera.directionWC.x, viewer.camera.directionWC.y, viewer.camera.directionWC.z],
+				up: [viewer.camera.upWC.x, viewer.camera.upWC.y, viewer.camera.upWC.z],
+			} } };
 		});
 
 		// --- Projection ------------------------------------------------------
 		// The UI select and this action share one handler, so a programmatic
 		// switch behaves exactly like picking the option.
-		ready(AGENT_ACTIONS.projectionSelect, async (params) => {
+		ready(AGENT_ACTIONS.projectionSelect, async (params, context) => {
 			const projectionId = params.projectionId as string;
+			if (projectSession.layerList.some(layer => isLayerRetrying(layer.id))) throw new AgentActionBusyError("Wait for layer retry to finish before changing projection.");
 			if (!projectionController) {
 				throw new AgentActionUnsupportedError(
 					"The projection runtime is not initialized yet.",
 				);
 			}
-			const result = await projectionController.select(projectionId);
+			const result = await projectionController.select(projectionId, { signal: context?.signal });
 			return {
 				data: {
 					projectionId: result.projectionId,
@@ -2301,7 +3341,7 @@ async function main(): Promise<void> {
 				// refuse before applying, exactly like the sidebar path.
 				guardGroupVisibility(groupId, active);
 				layerController.setGroupVisibility(groupId, active);
-				return { data: { active, groupId } };
+				return { data: { active, groupId, effective: projectSession.getEffectiveGroupVisibility(groupId) } };
 			}
 		);
 		ready(
@@ -2314,7 +3354,7 @@ async function main(): Promise<void> {
 					data: {
 						alpha,
 						groupId,
-						effective: projectSession.getGroup(groupId)?.alpha ?? alpha,
+						effective: projectSession.getEffectiveGroupOpacity(groupId),
 					},
 				};
 			}
@@ -2375,19 +3415,7 @@ async function main(): Promise<void> {
 		// --- Points ----------------------------------------------------------
 		ready(
 			AGENT_ACTIONS.pointsLoad,
-			async () => {
-				if (pointLoadInFlight) {
-					throw new AgentActionBusyError(
-						"A point dataset is already loading.",
-					);
-				}
-				// The GPU point shader is globe-only for now, so loading points while
-				// Rectangle is active or pending would show a mis-projected layer.
-				if (projectionController?.activeMode === "rectangle") {
-					throw new AgentActionUnsupportedError(
-						"Points cannot be loaded while the Rectangle projection is active; switch back to Globe first.",
-					);
-				}
+			async (_params, context) => {
 				if (!pointManifestRef) {
 					throw new AgentActionUnsupportedError(
 						"The point dataset manifest is not available in this build.",
@@ -2400,21 +3428,22 @@ async function main(): Promise<void> {
 				}
 				// Awaited: a network or GPU failure rejects here instead of being
 					// reported as a success.
-				await loadSelectedPointDataset();
+				await loadSelectedPointDataset(context?.signal);
 				return {
 					data: {
 						datasetId: loadedPointEntry?.id ?? "",
 						loaded: Boolean(loadedPointEntry),
 						selectedDatasetId: pointDatasetSelect.value,
+						frameConfirmed: true,
 					},
 				};
 			},
 		);
 		ready(
 			AGENT_ACTIONS.pointsSelectDataset,
-			async (params) => {
+			async (params, context) => {
 				const datasetId = params.datasetId as string;
-				await selectLocalPointDataset(datasetId, params.load === true);
+				await selectLocalPointDataset(datasetId, params.load === true, context?.signal);
 				// `loaded` is about the dataset that was just selected, not about
 				// whichever dataset happens to be in GPU memory.
 				return {
@@ -2423,6 +3452,7 @@ async function main(): Promise<void> {
 						loaded: loadedPointEntry?.id === datasetId,
 						loadedDatasetId: loadedPointEntry?.id ?? "",
 						selectedDatasetId: pointDatasetSelect.value,
+						frameConfirmed: params.load === true,
 					},
 				};
 			},
@@ -2461,22 +3491,18 @@ async function main(): Promise<void> {
 			},
 		);
 		ready(AGENT_ACTIONS.pointsUnload, () => {
-			unloadPointDataset();
+			if (!unloadPointDataset()) throw new Error("点资源释放失败，请再次卸载以重试。");
 			return {};
 		});
 
 		// --- Raster and project metadata -------------------------------------
 		ready(
 			AGENT_ACTIONS.rasterSelect,
-			(params) => {
+			async (params, context) => {
 				const rasterId = params.rasterId as string;
-				if (!singleRasterSelect.querySelector(`option[value="${rasterId}"]`)) {
-					throw new AgentActionValidationError(
-						`Unknown raster "${rasterId}".`,
-					);
-				}
-				selectSingleRaster(rasterId);
-				return { data: { rasterId } };
+				const layerId = params.layerId === undefined ? RUNTIME_LAYER_IDS.raster : params.layerId as number;
+				const result = await selectSingleRaster(rasterId, context?.signal, layerId);
+				return { data: { layerId, rasterId, selection: result } };
 			},
 		);
 		ready(
@@ -2492,8 +3518,34 @@ async function main(): Promise<void> {
 				return { data: { name: projectSession.projectName } };
 			},
 		);
+		for (const id of [AGENT_ACTIONS.pointsLoad, AGENT_ACTIONS.pointsSelectDataset]) {
+			agentActions.setAvailability(id, () => pointManifestRef
+				? undefined : "The point dataset manifest is not available yet.");
+		}
+		agentActions.setAvailability(AGENT_ACTIONS.rasterSelect, () => rasterManifest
+			? undefined : "The raster manifest is not available yet.");
 
 		// --- Cloud projects (V2 only) ----------------------------------------
+		ready(AGENT_ACTIONS.projectOpen, async params => {
+			requireV2Workspace(phase1BCloudClient.snapshot.v2WorkspaceAvailable, "cloud projects");
+			if (!phase1BCloudClient.snapshot.account) throw new AgentActionAuthError("Sign in before opening a cloud project.");
+			const revisionId = params.revisionId as number;
+			const project = phase1BCloudClient.snapshot.projects.find(item => Number(item.Revision.Value) === revisionId);
+			if (!project) throw new AgentActionValidationError(`Unknown project revision ${revisionId}. Refresh the project catalog.`);
+			window.clearTimeout(cloudAutosaveTimer);
+			const opened = await phase1BCloudClient.openProject(project, (document, original) => {
+				const session = ProjectSession.fromDocument(document);
+				if (session.isReadOnly) {
+					reviewedProject = { name: session.projectName, compatibility: session.compatibilityReport, original };
+					publishProjectState();
+					throw new AgentActionUnsupportedError("This cloud project requires compatibility review. Review the report and download its original input.");
+				}
+				return session.serializeLocalDraft();
+			});
+			reviewedProject = undefined;
+			window.setTimeout(() => window.location.reload(), 0);
+			return { reloadRequired: true, data: { revisionId: opened.reference.revisionId, contextId: opened.contextId } };
+		});
 		// Registered here rather than in the sidebar so the handler is the real
 			// async save the Save button uses. Availability is evaluated live from
 			// the capability handshake, so a V1-only Server answers `unsupported`
@@ -2519,17 +3571,19 @@ async function main(): Promise<void> {
 				? undefined
 				: "This Server does not implement the TimeMachine V2 workspace endpoints, so cloud projects cannot be saved.",
 		);
+		agentActions.setAvailability(AGENT_ACTIONS.projectOpen, () => phase1BCloudClient.snapshot.v2WorkspaceAvailable
+			? undefined : "This Server does not implement the TimeMachine V2 workspace endpoints, so cloud projects cannot be opened.");
 
 		// --- State sections -------------------------------------------------
 		// Only bounded scalars: no feature arrays, no GPU objects, no Cesium
 		// primitives. `gpmlParseResult.features` can hold tens of thousands of
 		// entries and must never be walked into a snapshot.
-		agentActions.registerStateSection("time", () => ({
+		registerStateSection("time", () => ({
 			ageMa: timeline.currentAgeMa,
 			playing: timeline.playing,
 			speedMaPerSecond: timeline.speedMaPerSecond,
 		}));
-		agentActions.registerStateSection("plateModel", () => ({
+		registerStateSection("plateModel", () => ({
 			featureCount: gpmlParseResult.features.length,
 			loadError: plateModelLoadError,
 			loadStatus: plateModelLoadError
@@ -2545,32 +3599,105 @@ async function main(): Promise<void> {
 			rotationSequenceCount: rotationParseResult.sequences.length,
 			unsupportedGeometryCount: gpmlParseResult.unsupportedGeometryCount,
 		}));
-		agentActions.registerStateSection("layers", () => ({
+		registerStateSection("layers", () => ({
 			groups: projectSession.groupList.map((group) => ({
 				active: group.active,
 				alpha: group.alpha,
 				collapsed: group.collapsed,
 				id: group.id,
+				name: group.name,
+				...(group.parentId === undefined ? {} : { parentId: group.parentId }),
+				effectiveVisible: projectSession.getEffectiveGroupVisibility(group.id),
+				effectiveAlpha: projectSession.getEffectiveGroupOpacity(group.id),
 			})),
 			layers: projectSession.layerList.map((layer) => ({
 				active: layer.active,
 				alpha: layer.alpha,
 				id: layer.id,
+				name: layer.name,
+				groupId: layer.groupId,
 				sourceRef: layer.sourceRef,
 				type: layer.type,
+				...(layer.type === ProjectLayerType.Atlas ? {
+					// Keep frame fields flat within the layer's state: nested frame
+					// objects exceed the bounded public snapshot's redaction depth.
+					atlasState: (() => {
+						const state = atlasStateSummary(layer.id);
+						return state ? { status: state.status, requestedAgeMa: state.requestedAgeMa,
+							frameTimeMa: state.frame?.timeMa ?? null, frameSourceId: state.frame?.sourceId ?? null,
+							frameLabel: state.frame?.label ?? null, committedFrameTimeMa: state.committedFrame?.timeMa ?? null,
+							committedSourceId: state.committedFrame?.sourceId ?? null, committedFrameLabel: state.committedFrame?.label ?? null,
+							...(state.reason ? { reason: state.reason } : {}) } : undefined;
+					})(), effectiveVisible: projectSession.getEffectiveLayerVisibility(layer.id),
+					effectiveAlpha: projectSession.getEffectiveLayerOpacity(layer.id),
+				} : {}),
+				...(layer.type === ProjectLayerType.Raster ? { ...(layer.rasterId === undefined ? {} : { rasterId: layer.rasterId }),
+					committedRasterId: rasterControllers.get(layer.id)?.getCommittedRaster()?.id ?? null,
+					requestedRasterId: rasterStates.get(layer.id)?.raster?.id ?? null,
+					effectiveVisible: projectSession.getEffectiveLayerVisibility(layer.id),
+					effectiveAlpha: projectSession.getEffectiveLayerOpacity(layer.id) } : {}),
+				...instanceRuntimeState(layer.id),
+				...(![ProjectLayerType.Point, ProjectLayerType.Line, ProjectLayerType.Polygon].includes(layer.type) || (Object.values(RUNTIME_LAYER_IDS) as number[]).includes(layer.id) ? {} : {
+					positionMode: "source-coordinates", reconstructionSupported: false,
+					displayOffsetMetres: NATIVE_VECTOR_DISPLAY_OFFSET_METRES,
+					effectiveVisible: projectSession.getEffectiveLayerVisibility(layer.id),
+					effectiveAlpha: projectSession.getEffectiveLayerOpacity(layer.id),
+				}),
 			})),
 		}));
-		agentActions.registerStateSection("points", () => ({
+		registerStateSection("points", () => ({
 			datasetId: loadedPointEntry?.id ?? "",
 			loaded: Boolean(loadedPointEntry),
 			selectedDatasetId: pointDatasetSelect.value,
+			loading: pointLoadInFlight,
+			status: pointStatus.dataset.state ?? "idle",
 		}));
-		agentActions.registerStateSection("projection", () => {
+		registerStateSection("atlas", () => {
+			const state = atlasRuntimeState;
+			const loadError = atlasErrors.get(RUNTIME_LAYER_IDS.atlas);
+			const committed = atlasController?.getCommittedFrame();
+			return {
+				status: loadError ? "error" : state?.status ?? (atlasInitializationError ? "error" : "idle"),
+				requestedAgeMa: state?.requestedAgeMa ?? timeline.currentAgeMa,
+				frame: state && "frame" in state && state.frame ? {
+					sourceId: state.frame.sourceId,
+					timeMa: state.frame.timeMa,
+					label: state.frame.label,
+				} : null,
+				committedFrame: committed ? {
+					sourceId: committed.sourceId,
+					timeMa: committed.timeMa,
+					label: committed.label,
+				} : null,
+				...(state?.status === "hidden" ? { reason: state.reason } : {}),
+				...(loadError ? { message: loadError } : state?.status === "error" ? { message: state.message }
+					: atlasInitializationError ? { message: atlasInitializationError } : {}),
+			};
+		});
+		registerStateSection("raster", () => {
+			const state = singleRasterRuntimeState;
+			const loadError = rasterErrors.get(RUNTIME_LAYER_IDS.raster);
+			const committed = singleRasterController?.getCommittedRaster();
+			const brief = (entry?: SingleRasterEntry) => entry ? { id: entry.id, sourceId: entry.sourceId, label: entry.label } : null;
+			return {
+				status: loadError ? "error" : state?.status ?? (singleRasterInitializationError ? "error" : "unavailable"),
+				requestedRaster: brief(state?.raster), committedRaster: brief(committed),
+				...(loadError ? { message: loadError } : state?.status === "error" ? { message: state.message }
+					: singleRasterInitializationError ? { message: singleRasterInitializationError } : {}),
+			};
+		});
+		registerStateSection("projection", () => {
 			const snapshot = projectionController?.getSnapshot();
 			if (!snapshot) {
 				return { status: "idle" };
 			}
 			return {
+				camera: {
+					...snapshot.camera,
+					position: [viewer.camera.positionWC.x, viewer.camera.positionWC.y, viewer.camera.positionWC.z],
+					direction: [viewer.camera.directionWC.x, viewer.camera.directionWC.y, viewer.camera.directionWC.z],
+					up: [viewer.camera.upWC.x, viewer.camera.upWC.y, viewer.camera.upWC.z],
+				},
 				availableModes: snapshot.availableModes,
 				committedId: snapshot.committedId,
 				committedTimeMa: snapshot.committedTimeMa,
@@ -2583,23 +3710,45 @@ async function main(): Promise<void> {
 			};
 		});
 	};
+	// Follow the current view without submitting another time request. Early UI
+	// changes may replace a pending request while the startup overlay is visible.
+	const initialProjectionController = projectionController;
+	await confirmStartupView(viewer.scene, () => initialProjectionController.getSnapshot(), (state) => {
+		if (state.committedId !== "globe") return;
+		if (viewer.scene.mode !== SceneMode.SCENE3D) throw new Error("The initial committed Globe view does not match the scene mode.");
+		currentTimeState = renderer.updateTime(state.committedTimeMa, rotationModel);
+		pointRenderer?.setTime(state.committedTimeMa, currentTimeState.rotationMap);
+	}, startupFrameAbort.signal);
 	registerRenderAgentActions();
+	// Restore explicit ordinary-vector references after the core view and API.
+	// Unsupported sources stay visible as error records; they never fall back.
+	for (const layer of projectSession.layerList) {
+		if (![ProjectLayerType.Point, ProjectLayerType.Line, ProjectLayerType.Polygon].includes(layer.type) || (Object.values(RUNTIME_LAYER_IDS) as number[]).includes(layer.id)) continue;
+		void loadNativePointInstance(layer.id, layer.sourceRef).catch(() => undefined);
+	}
+	// Fetches already run in parallel. Attach optional resources only after the
+	// core frame: an early pending time must not acquire a new, still-loading
+	// Atlas as a prerequisite for registering the core API and finishing startup.
+	void initializeAtlas();
+	void initializeSingleRaster();
+	void initializePoints();
 
-	loadingTitle.textContent = "重建就绪";
+	loadingTitle.textContent = "核心视图就绪";
 	loadingDetail.textContent = `${loadedPlateModelLabel} · ${
 		gpmlParseResult.features.length
 	} 个要素，${rotationParseResult.sequences.length} 条旋转序列${
 		plateModelLoadError ? `；加载失败：${plateModelLoadError}` : ""
-	}；数值链路已通过黄金值校验。`;
+	}。`;
 	loadingProgress.style.width = "100%";
-	await platformBootstrap;
-	await phase1BInitialization;
-	await new Promise((resolve) => window.setTimeout(resolve, 420));
 	loadingOverlay.classList.add("is-complete");
 	viewer.scene.requestRender();
 }
 
 main().catch((error: unknown) => {
+	agentActions.diagnostics.record({
+		level: "error", category: "app", event: "app.initialization-failed", outcome: "failed",
+		error: error instanceof Error ? error : { message: "Application initialization failed." },
+	});
 	const loadingTitle = document.querySelector("#loading-title");
 	const loadingDetail = document.querySelector("#loading-detail");
 	const loadingOverlay = document.querySelector("#loading-overlay");
@@ -2608,5 +3757,5 @@ main().catch((error: unknown) => {
 		(loadingDetail.textContent =
 			error instanceof Error ? error.message : String(error));
 	loadingOverlay?.classList.add("has-error");
-	console.error(error);
+	console.error("TimeMachine initialization failed. Inspect the local diagnostics.");
 });

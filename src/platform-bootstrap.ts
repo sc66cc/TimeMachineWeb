@@ -3,6 +3,7 @@ import {
   TimeMachinePlatformRuntime,
   type CapabilitySnapshot,
 } from "@timemachine/platform-runtime";
+import { withRpcDiagnostics } from "./diagnostics/rpc-options";
 
 let activeRuntime: TimeMachinePlatformRuntime | undefined;
 let bootstrapPromise: Promise<CapabilitySnapshot | undefined> | undefined;
@@ -46,7 +47,7 @@ async function bootstrapPlatform(): Promise<CapabilitySnapshot | undefined> {
     return undefined;
   }
 
-  activeRuntime = new TimeMachinePlatformRuntime({
+  activeRuntime = new TimeMachinePlatformRuntime(withRpcDiagnostics({
     baseUrl,
     clientVersion:
       import.meta.env.VITE_TIMEMACHINE_CLIENT_VERSION ?? "0.1.0-web",
@@ -58,7 +59,7 @@ async function bootstrapPlatform(): Promise<CapabilitySnapshot | undefined> {
         new CustomEvent("timemachine:auth", { detail: event }),
       );
     },
-  });
+  }));
 
   const snapshot = await activeRuntime.loadCapabilities();
   document.documentElement.dataset.timeMachineContract =

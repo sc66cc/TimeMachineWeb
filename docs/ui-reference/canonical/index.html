@@ -1021,7 +1021,7 @@
         <div class="time-readout"><span id="main-age">31.9</span> Ma</div>
         <label class="city-toggle"><input id="city-checkbox" type="checkbox"> <span>Major cities</span></label>
         <label class="place-search"><input type="search" placeholder="Input a place name."><svg class="icon"><use href="#i-search"/></svg></label>
-        <div class="projection-control"><label for="projection-select">Projection</label><select id="projection-select"><option value="globe">Globe (3D)</option><option value="rectangle">Rectangle</option><option value="mollweide" disabled>Mollweide</option></select></div>
+        <div class="projection-control"><label for="projection-select">Projection</label><select id="projection-select"><option value="globe">Globe (3D)</option><option value="rectangle">Rectangle</option><option value="mollweide">Mollweide</option></select></div>
         <p class="projection-status" id="projection-status" aria-live="polite">Globe (3D)</p>
         <div class="globe" id="globe" aria-label="Interactive paleogeographic globe">
           <img class="globe__imagery" src="./timemachine-reference-1to1.png" alt="Paleogeographic globe imagery" draggable="false">
@@ -1154,11 +1154,6 @@
       const projectionLabels = { globe: 'Globe (3D)', rectangle: 'Rectangle', mollweide: 'Mollweide' };
       projectionSelect.addEventListener('change', (event) => {
         const value = event.target.value;
-        if (value === 'mollweide') {
-          projectionStatus.textContent = 'Mollweide is not implemented yet.';
-          event.target.value = 'globe';
-          return;
-        }
         projectionStatus.textContent = projectionLabels[value] || value;
       });
       let globeScale = 1;
