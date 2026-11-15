@@ -4,6 +4,25 @@
 （Plate Carrée）可切换版本；Mollweide、rectangle 内的点/影像层、平面 GPU 点与
 投影瓦片网格仍未实现，见 [agent-api.md](agent-api.md) 的能力边界。
 
+## 平面相机 Agent 验收补充
+
+`camera.zoom({ factor })` 乘当前视野宽度：大于 1 缩小地图，小于 1 放大；
+范围 `[0.01, 100]`，返回实际 `mode/width/factor`（如实包含钳制）。
+`camera.pan({ deltaX, deltaY })` 是 CSS 像素拖动量，正 X 内容右移，正 Y 内容下移，
+每轴范围 `[-100000, 100000]`。非有限值/越界返回 400；Globe 暂返回 501。
+Mollweide 与真实 wheel/ctrl-wheel、pointermove 共享底层方法；Rectangle 保留原生
+单一输入控制器，API 调用公共 Camera zoom/move。Home 和原 Globe GUI 手感不变。
+
+`getState().projection.camera` 是只读即时状态：实际 logical `mode`、CSS `viewport`、
+平面视野米制 `width`、完整世界域 `worldBounds`（canvas-relative CSS）及 `worldRatio`。
+Moll 使用 ellipse 四极值，Rectangle 使用完整 domain 四角而非 plate bbox。
+这些调用不改变年代、投影选择或项目持久化，不暴露 Viewer/GL/大数组。
+
+Moll → Globe 待 render 时由新 Globe 年代请求接管并成功后，会以原 renderer token
+confirm 旧 swap、释放 retained 旧帧；之后 Rectangle 准备失败不得回滚到旧 Moll。
+反方向的平面年代接管保留原 checkpoint/token，仅转移 controller owner；失败仍真实
+rollback，并恢复 renderError 停掉的 loop。
+
 ## 这是什么
 
 同一个 Cesium `Viewer` 上的原生 2D 板块视图：
@@ -102,3 +121,15 @@ GPU renderer；原生 Primitive/outline 仍逐帧构建并上传，未减少顶�
 49 次年代确认约对应本次测试每秒 16 次画面更新，不是显示器 render FPS；上述数字也不是 Cesium/GPU 的硬件上限。继续追求更高刷新率，需要另外评估常驻 GPU 几何与反子午线／极点／轮廓／拾取的正确性，不能直接把 native 路径的性能称为硬件极限。
 
 复验证据：`/tmp/timemachineweb-test/rectangle-scrub-parent-after.json`、`rectangle-true-pointer-before-release.json`、`rectangle-true-pointer-after-release.json`、`rectangle-stream-mode-cancel-parent.json`。
+
+### Mollweide 扩展接手验证（未验收，不替代以上 Rectangle 交付状态）
+
+工作区新增了 Mollweide CPU 帧、正交平面相机及共用队列接线，当前仍有明确阻塞，不能把 UI 中可选择 Mollweide 当作端到端已交付。
+
+- 真实 `GPlates-16c50bd7-f067-4348-b4aa-10002f0229d1#0#412` 保留 frozen oracle 的 unsupported；runtime 有界细分测试通过，共享边邻面同步拆分、原 buffer 不变、球面面积与绕序均验证。细分结果延迟替换已输出邻面，sourceTriangleIndices 保留原 face ordinal。深度/新增三角形预算与 abort 都有诊断路径；额外检查子面球面绕序和面积守恒，不能为成功吞掉非零子面。
+- 真实 PALEOMAP 全模型 CPU 测试通过 0 / 100 Ma，但 **180 Ma 仍失败**：`GPlates-bca3ad77-3ed6-44bd-b960-113891b1a986#0#889` 的旋转后球面面积约 −1.67e−20 sr，oracle 判 degenerate，但不是严格零；当前细分耗尽深度预算，保留源 ID 报错，不丢面。该回归和全模型回归保留为失败，尚未改变退化定义或冻结 oracle。
+- 4183 浏览器已显示真实 Mollweide 0 / 100 Ma 椭圆、轮廓与 graticule；Rectangle→Globe→Mollweide 动作均真实确认。opacity 动作成功。完整 world ellipse 最大 zoom-out 约 176×88 CSS px，canvas 1024×439，比例约 17.2% / 20.0%；ctrl+wheel 正向缩出、反向可缩回。三 aspect（1.6 / 3 / .75）的完整世界域 Home 65% / max 20% 单测通过。物理 MacBook 手势未测试，孔洞/native pick/Inspector 和失败回滚尚未完成端到端验收。
+- 原始 Mollweide 连续输入测试在约 3 秒输入期间为 **0 个确认提交**；100 Ma active 约 10.94s 确认，最终 100.59 Ma 约 11.28s 确认，未达到目标。profile 后新增 compact vertex→face incidence 和叶结果缓存，100 Ma triangle 阶段从约 9.8s 降到约 265ms、0 Ma 从约 3.4s 降到约 521ms（Node CPU 测量，不是浏览器 commit 率）。优化后浏览器复测：100 Ma 进入约 516ms；3.002s 持续输入期间 **10 个**真实确认年代（约 3.3 commits/s，不是 10/s），但最终 100.60 Ma 遇到同一 `…bca3ad77…#0#889` 面的球面面积守恒诊断，保留最后合法 100.52 Ma、状态 error。最终年代对齐和性能门槛均未通过，不能称为实时交付。仍不是持久 GPU renderer。
+- 同浏览器 Rectangle 持续输入约 3.010s，输入期间 47 个确认提交，最终 116 Ma 于约 3.123s 确认，单 active/latest pending 未退化。
+
+证据位于 `/tmp/timemachineweb-test/`：`moll-completion-age0.png`、`moll-completion-home100.png`、`moll-completion-maxzoom100.png`、`moll-completion-stream3s.json`、`moll-completion-stream3s-profiled.json`、`moll-completion-three-mode.json`、`moll-completion-rectangle-stream.json`、`moll-profile-leafcache.log`。构建仅写独立 `rectangle-mvp-dist`，未覆盖 root dist / 4173，未重启既有服务。

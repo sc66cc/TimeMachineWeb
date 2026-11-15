@@ -126,6 +126,25 @@ async function createRenderer(plateId = 101): Promise<{
 }
 
 describe("rectangle frame staging / commit / restore", () => {
+  it("keeps a warming Moll frame alive while preparing one single-use successor", async () => {
+    const { renderer, primitives, added } = await createRenderer();
+    const model = createRotationModel(new Map([[101, IDENTITY_QUATERNION]]));
+    const a = await renderer.prepareRectangleFrame(50, model, "mollweide");
+    const warming = renderer.stageRectangleFrame(a, 10);
+    const rejected = expect(warming).rejects.toThrow(/abort/i);
+    const fill = added[added.length - 2] as Primitive;
+    const count = primitives.length;
+    const b = await renderer.prepareRectangleFrame(51, model, "mollweide");
+    expect(fill.isDestroyed()).toBe(false);
+    expect(primitives.length).toBe(count);
+    await expect(renderer.stageRectangleFrame(a, 10)).rejects.toThrow(/abort/i);
+    expect(fill.isDestroyed()).toBe(false);
+    renderer.cancelRectangleStaging(); await rejected;
+    const next = renderer.stageRectangleFrame(b, 11);
+    const nextRejected = expect(next).rejects.toThrow(/abort/i);
+    await expect(renderer.stageRectangleFrame(b, 11)).rejects.toThrow(/abort/i);
+    renderer.destroy(); await nextRejected;
+  });
   it("rejects staging a stale or already-consumed handle", async () => {
     const { renderer } = await createRenderer();
     const model = createRotationModel(new Map([[101, IDENTITY_QUATERNION]]));

@@ -8,8 +8,11 @@ import {
   AgentActionUnsupportedError,
   AgentActionValidationError,
 } from "../agent-actions/registry";
+import { OperationInterruptedError } from "../agent-actions/operation";
 
-/** Projection modes. Mollweide is declared but has no runtime yet. */
+import { FlatMapCamera } from "./flat-map-camera";
+
+/** Plate-only projections sharing the same bounded native-frame queue. */
 export type ProjectionModeId = "globe" | "rectangle" | "mollweide";
 
 export type ProjectionStatus = "idle" | "preparing" | "ready" | "error";
@@ -35,6 +38,7 @@ export interface ProjectionTimeCounts {
 
 /** The public projection state, safe to expose through the agent facade. */
 export interface ProjectionSnapshot {
+  camera?: ReturnType<FlatMapCamera["getSnapshot"]>;
   availableModes: ProjectionModeAvailability[];
   committedId: ProjectionModeId;
   committedTimeMa: number;
@@ -57,6 +61,26 @@ export interface ProjectionLayerRow {
 export interface ProjectionGroupRow {
   id: number;
   active: boolean;
+  parentId?: number;
+}
+
+/** The current application's layers, retained until their shared frame commits. */
+export interface TimeLayerPreparation {
+  ready: Promise<void>;
+  activate(): void;
+  canConfirm(): boolean;
+  accept(): void;
+  rollback(): void;
+  retire(): void;
+}
+
+export interface TimeLayerContext {
+  owner: object;
+  generation: number;
+  ageMa: number;
+  mode: ProjectionModeId;
+  signal: AbortSignal;
+  onFailure(error: unknown): void;
 }
 
 /**
@@ -80,6 +104,8 @@ export interface ProjectionHost {
   captureGlobeCamera(): void;
   restoreGlobeCamera(): void;
   applyGlobeFrame(timeMa: number): ProjectionTimeCounts;
+  captureTimeLayers?(context: TimeLayerContext): TimeLayerPreparation;
+  onTimeLayerCleanupError?(error: unknown): void;
   globeHome(): void;
 }
 
@@ -119,7 +145,19 @@ interface RenderWaiter {
   remove: () => void;
 }
 
-interface RectangleTimeRequest {
+interface TimeRequest {
+  readonly owner: object;
+  readonly abortController: AbortController;
+  generation?: number;
+  layers?: TimeLayerPreparation;
+  layerFailure?: Promise<never>;
+  failure?: Error;
+  cancellation?: OperationInterruptedError;
+  accepted?: boolean;
+  layersRolledBack?: boolean;
+  releaseLayerObservers?: () => void;
+  cleanupError?: unknown;
+  prepared?: Promise<Awaited<ReturnType<PlateRenderer["prepareRectangleFrame"]>>>;
   ageMa: number;
   resolve: () => void;
   reject: (error: unknown) => void;
@@ -130,7 +168,7 @@ interface RectangleTimeRequest {
  *
  * Both the UI select and the `projection.select` agent action call
  * {@link select}; both the timeline and `time.set` call {@link setTime}. One
- * mode/source epoch governs all of them through {@link applyView}. Rectangle
+ * mode/source epoch governs all of them through {@link applyView}. All
  * time changes keep one active frame and one latest pending request, so ongoing
  * input cannot starve confirmation. Mode changes cancel both; overwritten
  * pending requests reject as `busy` (409).
@@ -165,15 +203,31 @@ export class ProjectionController {
   private lastError: ProjectionErrorSnapshot | undefined;
   /** Mode/source epoch; same-mode queued times do not invalidate active work. */
   private requestGeneration = 0;
-  private activeTimeRequest: RectangleTimeRequest | undefined;
-  private pendingTimeRequest: RectangleTimeRequest | undefined;
+  private sourceInvalidated = false;
+  private activeTimeRequest: TimeRequest | undefined;
+  private pendingTimeRequest: TimeRequest | undefined;
+  /** Moll only: one CPU-active/ready successor while the current frame warms/renders. */
+  private prefetchedTimeRequest: TimeRequest | undefined;
+  private mollGpuActive = false;
   /** The in-flight render-confirmation waiter, rejectable without a new frame. */
   private renderWaiter: RenderWaiter | undefined;
+  /** Owner of a synchronous Globe update not yet confirmed by postRender. */
+  private globeFrameOwner: number | undefined;
 
-  constructor(private readonly host: ProjectionHost) {}
+  private readonly flatCamera: FlatMapCamera | undefined;
+  private swap: { generation: number; owner: number; camera: ReturnType<FlatMapCamera["capture"]>; mode: ProjectionModeId } | undefined;
+
+  constructor(private readonly host: ProjectionHost) {
+    // Read-only unit stand-ins have no DOM camera; real viewers always take this path.
+    if (typeof host.viewer.scene.canvas?.addEventListener === "function" && typeof host.viewer.camera.frustum?.clone === "function") {
+      this.flatCamera = new FlatMapCamera(host.viewer);
+      host.plateRenderer.setFlatPickFilter(position => this.flatCamera!.contains(position));
+    }
+  }
 
   getSnapshot(): ProjectionSnapshot {
     return {
+      camera: this.flatCamera?.getSnapshot(),
       availableModes: this.computeAvailableModes(),
       committedId: this.committedId,
       committedTimeMa: this.committedTimeMa,
@@ -212,9 +266,10 @@ export class ProjectionController {
   /**
    * The shared projection handler. Resolves only after the target view has
    * actually committed and rendered; rejects with a structured failure for a
-   * superseded (`busy`), unsupported or internal problem.
+   * cancelled, superseded, unsupported or internal problem.
    */
-  async select(projectionId: unknown): Promise<{ projectionId: ProjectionModeId; revision: number }> {
+  async select(projectionId: unknown, options: { signal?: AbortSignal } = {}): Promise<{ projectionId: ProjectionModeId; revision: number }> {
+    this.assertSourceCurrent();
     if (
       typeof projectionId !== "string" ||
       !MODE_IDS.includes(projectionId as ProjectionModeId)
@@ -223,12 +278,9 @@ export class ProjectionController {
         `projectionId must be one of ${MODE_IDS.join(", ")}.`,
       );
     }
+    const signal = options.signal;
+    if (signal?.aborted) throw new OperationInterruptedError("cancelled");
     const target = projectionId as ProjectionModeId;
-    if (target === "mollweide") {
-      throw new AgentActionUnsupportedError(
-        "Mollweide projection is not implemented yet.",
-      );
-    }
     // A no-op only when the target is already committed, the scene is
     // actually in that mode, and the last request fully succeeded. After an
     // error - for example a confirmation renderError that morphed the scene but
@@ -242,36 +294,101 @@ export class ProjectionController {
     ) {
       return { projectionId: this.committedId, revision: this.revision };
     }
-    if (target === "rectangle") {
-      this.assertRectangleCapability();
+    if (target !== "globe") {
+      this.assertRectangleCapability(target);
     }
 
-    this.cancelTimeRequests();
-    this.host.plateRenderer.cancelRectanglePreparation();
     const generation = ++this.requestGeneration;
+    const cancelledTime = this.cancelTimeRequests();
+    if (generation !== this.requestGeneration) {
+      this.rollbackTimeLayers(cancelledTime);
+      throw new OperationInterruptedError("superseded");
+    }
+    this.cancelRenderWaiter();
+    this.rollbackInterruptedView(cancelledTime);
+    if (generation !== this.requestGeneration) throw new OperationInterruptedError("superseded");
     this.activeModeId = target;
     this.requestedId = target;
     this.status = "preparing";
     this.lastError = undefined;
+    let frameConfirmed = false;
+    let cancellation: OperationInterruptedError | undefined;
+    let recovery: Promise<void> | undefined;
+    let recoveryFailure: Error | undefined;
+    let rejectCancellation: (error: Error) => void = () => {};
+    const interrupted = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; });
+    const abort = (): void => {
+      // A signal belongs to this selection, never to whichever request is now active.
+      if (frameConfirmed || cancellation || generation !== this.requestGeneration) return;
+      cancellation = new OperationInterruptedError("cancelled");
+      const needsRecoveryRender = this.swap?.owner === generation || this.globeFrameOwner === generation;
+      const recoveryGeneration = ++this.requestGeneration;
+      try {
+        this.cancelRenderWaiter(cancellation);
+        this.host.plateRenderer.cancelRectanglePreparation();
+        this.host.plateRenderer.cancelRectangleStaging();
+        this.rollbackGlobeFrame(generation);
+        this.rollbackSwap(generation);
+        this.host.setGlobeInertiaEnabled(this.morphedModeId === "globe");
+        this.activeModeId = this.morphedModeId;
+        this.requestedId = this.committedId;
+        this.requestedTimeMa = this.committedTimeMa;
+        this.status = needsRecoveryRender ? "preparing" : "ready";
+        this.lastError = undefined;
+        if (needsRecoveryRender) {
+          recovery = this.awaitNextRender(recoveryGeneration).then(() => {
+            if (recoveryGeneration !== this.requestGeneration) return;
+            this.status = "ready";
+            this.publish();
+          }).catch(error => {
+            // A newer owner may replace this recovery; its state is never ours to reset.
+            if (recoveryGeneration !== this.requestGeneration) return;
+            this.status = "error";
+            this.lastError = this.toError(error);
+            this.publish();
+            throw error;
+          });
+        }
+      } catch (error) {
+        // AbortSignal callbacks must not leak errors or claim a failed rollback succeeded.
+        recoveryFailure = error instanceof Error ? error : new Error(String(error));
+        this.status = "error";
+        this.lastError = this.toError(recoveryFailure);
+      }
+      this.publish();
+      rejectCancellation(recoveryFailure ?? cancellation);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     this.publish();
 
     try {
-      const ageMa = this.host.getCurrentTimeMa();
-      this.requestedTimeMa = ageMa;
-      await this.applyView(target, ageMa, generation);
+      // An application state observer may synchronously abort during publish.
+      if (signal?.aborted) abort();
+      if (cancellation) await interrupted;
+      if (generation !== this.requestGeneration) throw new OperationInterruptedError("superseded");
+      // Changing the projection must not apply an uncommitted timeline request
+      // through the plate-only path. Cancelled time callers have an explicit
+      // result; retain their requested age so the UI can offer an honest retry.
+      const ageMa = this.committedTimeMa;
+      const applied = this.applyView(target, ageMa, generation, undefined, Boolean(signal), () => { frameConfirmed = true; });
+      await Promise.race([applied, interrupted]);
       if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded by a newer request.");
+        throw new OperationInterruptedError("superseded");
       }
       this.commitSuccess(target);
       return { projectionId: target, revision: this.revision };
     } catch (error) {
-      if (generation !== this.requestGeneration) {
-        // Superseded: settle as busy, leave the newer request's state alone and
-        // raise no error toast for this stale attempt.
-        throw new AgentActionBusyError(
-          "Superseded by a newer projection request.",
-        );
+      if (cancellation) {
+        if (recoveryFailure) throw recoveryFailure;
+        await recovery;
+        throw cancellation;
       }
+      if (generation !== this.requestGeneration) {
+        throw new OperationInterruptedError("superseded");
+      }
+      this.rollbackGlobeFrame(generation);
+      this.rollbackSwap(generation);
+      this.host.setGlobeInertiaEnabled(this.morphedModeId === "globe");
       this.status = "error";
       this.requestedId = this.committedId;
       // The scene did not reach the committed target, so dispatch follows what
@@ -282,120 +399,358 @@ export class ProjectionController {
       this.lastError = this.toError(error);
       this.publish();
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
     }
   }
 
   /**
    * The shared time handler. Dispatches by {@link activeMode} - the latest
    * target - so a time change that lands mid-switch completes that switch's
-   * scene and renderer. In globe it is the synchronous fast path; in rectangle
-   * it confirms the active frame before starting the latest pending time.
+   * scene and renderer. Each mode confirms the active frame before starting
+   * the latest pending time; Globe's synchronous update still needs a render.
    * Overwritten pending changes settle as `busy`; active changes resolve only
    * after their own age has really rendered.
    */
-  async setTime(ageMa: number): Promise<void> {
+  async setTime(ageMa: number, options: { signal?: AbortSignal } = {}): Promise<void> {
+    this.assertSourceCurrent();
     if (!Number.isFinite(ageMa)) {
       throw new AgentActionValidationError("ageMa must be a finite number.");
     }
+    if (options.signal?.aborted) throw new OperationInterruptedError("cancelled");
     this.requestedTimeMa = ageMa;
-    if (this.activeModeId === "rectangle") {
-      const promise = new Promise<void>((resolve, reject) => {
-        const request = { ageMa, resolve, reject };
-        if (this.activeTimeRequest) {
-          this.pendingTimeRequest?.reject(
-            new AgentActionBusyError("Superseded by a newer time request."),
-          );
-          this.pendingTimeRequest = request;
-        } else {
-          const generation = ++this.requestGeneration;
-          this.activeTimeRequest = request;
-          void this.runRectangleTime(request, generation);
-        }
-      });
-      this.status = "preparing";
-      this.lastError = undefined;
-      this.publish();
-      return promise;
-    }
-    const generation = ++this.requestGeneration;
-    try {
-      await this.applyView(this.activeModeId, ageMa, generation);
-      if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded by a newer time request.");
+    // Retry input may arrive while an existing ticket is waiting on a stopped
+    // Widget loop. Resume now, not only when that queued input becomes active.
+    this.resumeRenderLoop();
+    this.status = "preparing";
+    this.lastError = undefined;
+    const promise = new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener("abort", abort);
+        if (error === undefined) resolve(); else reject(error);
+      };
+      const request: TimeRequest = {
+        owner: {}, abortController: new AbortController(), ageMa,
+        resolve: () => finish(), reject: error => finish(error),
+      };
+      const abort = () => { if (!settled) this.cancelTimeRequest(request); };
+      options.signal?.addEventListener("abort", abort, { once: true });
+      if (this.activeTimeRequest) {
+        this.pendingTimeRequest?.reject(
+          new OperationInterruptedError("superseded", "Superseded by a newer time request."),
+        );
+        this.pendingTimeRequest = request;
+        this.prefetchMollTime();
+      } else {
+        const generation = ++this.requestGeneration;
+        this.activeTimeRequest = request;
+        if (this.swap) this.swap.owner = generation;
+        void this.runTime(request, generation);
       }
-      this.commitSuccess(this.activeModeId);
-    } catch (error) {
-      if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded by a newer time request.");
-      }
-      // A real rectangle time failure keeps the last committed picture; the
-      // requested time falls back to what is actually shown.
-      this.status = "error";
-      this.requestedTimeMa = this.committedTimeMa;
-      this.lastError = this.toError(error);
-      this.publish();
-      throw error;
-    }
+    });
+    this.publish();
+    return promise;
   }
 
-  private async runRectangleTime(
-    request: RectangleTimeRequest,
+  /** Caller cancellation belongs to one ticket, not the mode/source epoch. */
+  private cancelTimeRequest(request: TimeRequest): void {
+    if (request.accepted || request.failure || request.cancellation) return;
+    const error = new OperationInterruptedError("cancelled");
+    if (this.activeTimeRequest === request) {
+      request.cancellation = error;
+      request.abortController.abort(error);
+      return;
+    }
+    const promoted = this.prefetchedTimeRequest === request;
+    if (!promoted && this.pendingTimeRequest !== request) return;
+    if (promoted) this.prefetchedTimeRequest = undefined;
+    else this.pendingTimeRequest = undefined;
+    request.cancellation = error;
+    request.abortController.abort(error);
+    let failure: unknown = error;
+    if (promoted) {
+      try { this.host.plateRenderer.cancelRectanglePreparation(); }
+      catch (cleanupError) { failure = cleanupError; }
+    }
+    request.reject(failure);
+    this.requestedTimeMa = this.pendingTimeRequest?.ageMa ?? this.prefetchedTimeRequest?.ageMa ?? this.activeTimeRequest?.ageMa ?? this.committedTimeMa;
+    this.prefetchMollTime();
+    this.publish();
+  }
+
+  private async runTime(
+    request: TimeRequest,
     generation: number,
   ): Promise<void> {
     try {
-      await this.applyView("rectangle", request.ageMa, generation);
+      const mode = this.activeModeId;
+      request.generation = generation;
+      this.captureTimeLayers(request, generation, mode);
+      this.assertTimeOwner(request, generation);
+      // Every time replacement needs its predecessor until postRender confirms
+      // it, including Rectangle frames with no external cancellation signal.
+      const applied = this.applyView(mode, request.ageMa, generation, request.prepared, true, undefined, request);
+      await (request.layerFailure ? Promise.race([applied, request.layerFailure]) : applied);
       if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded by a newer request.");
+        if (request.accepted) { request.resolve(); return; }
+        throw new OperationInterruptedError("superseded", "Superseded by a newer request.");
       }
       // Do not overwrite requestedTimeMa: it belongs to the newest input.
-      this.commitSuccess("rectangle");
+      this.commitSuccess(this.activeModeId);
+      if (request.cleanupError !== undefined && !this.host.onTimeLayerCleanupError) {
+        this.lastError = this.toError(request.cleanupError);
+        this.publish();
+      }
       request.resolve();
     } catch (error) {
-      request.reject(error);
-      if (generation !== this.requestGeneration) return;
+      if (request.accepted) {
+        this.reportTimeLayerCleanupError(request, error);
+        request.resolve();
+        return;
+      }
+      if (generation !== this.requestGeneration || this.activeTimeRequest !== request) {
+        try { this.rollbackTimeLayers(request); }
+        catch (recoveryError) {
+          this.reportTimeLayerCleanupError(request, recoveryError);
+          request.reject(recoveryError); return;
+        }
+        request.reject(error); return;
+      }
       // A failed native frame invalidates queued work; a fresh input can retry.
-      this.pendingTimeRequest?.reject(error);
+      let failure = error;
+      const needsRecoveryRender = this.globeFrameOwner === generation || this.swap?.owner === generation;
+      request.abortController.abort(error);
+      if (generation !== this.requestGeneration || this.activeTimeRequest !== request) {
+        request.reject(error); return;
+      }
+      try {
+        this.cancelPreparedFrame(request, false, generation, Boolean(request.cancellation && this.prefetchedTimeRequest));
+      } catch (recoveryError) {
+        failure = recoveryError;
+      }
+      if (generation !== this.requestGeneration || this.activeTimeRequest !== request) {
+        request.reject(failure); return;
+      }
+      this.activeModeId = this.morphedModeId;
+      this.requestedId = this.committedId;
+      if ((request.cancellation || needsRecoveryRender) && failure === error) {
+        if (request.cancellation) this.requestedTimeMa = this.pendingTimeRequest?.ageMa ?? this.prefetchedTimeRequest?.ageMa ?? this.committedTimeMa;
+        this.lastError = request.cancellation ? undefined : this.toError(error);
+        this.status = needsRecoveryRender || this.pendingTimeRequest || this.prefetchedTimeRequest ? "preparing" : "ready";
+        try {
+          this.publish();
+          if (generation !== this.requestGeneration || this.activeTimeRequest !== request) { request.reject(failure); return; }
+          if (needsRecoveryRender) await this.awaitNextRender(generation, undefined, 30_000);
+        } catch (recoveryError) {
+          failure = recoveryError;
+        }
+        if (generation !== this.requestGeneration || this.activeTimeRequest !== request) { request.reject(failure); return; }
+        if (request.cancellation && failure === error) {
+          this.status = this.pendingTimeRequest || this.prefetchedTimeRequest ? "preparing" : "ready";
+          request.reject(request.cancellation);
+          this.publish();
+          return;
+        }
+        // A failed recovery is a real failure, not a successful cancellation.
+        if (request.cancellation) {
+          try { this.host.plateRenderer.cancelRectanglePreparation(); }
+          catch (cleanupError) { failure = cleanupError; }
+        }
+      }
+      request.reject(failure);
+      this.pendingTimeRequest?.reject(failure);
+      this.prefetchedTimeRequest?.reject(failure);
       this.pendingTimeRequest = undefined;
-      this.host.plateRenderer.cancelRectangleStaging();
+      this.prefetchedTimeRequest = undefined;
+      this.host.setGlobeInertiaEnabled(this.morphedModeId === "globe");
       this.status = "error";
-      this.requestedTimeMa = this.committedTimeMa;
-      this.lastError = this.toError(error);
+      // Keep the latest input honest even when a CPU/GPU ticket fails.
+      this.lastError = this.toError(failure);
       this.publish();
     } finally {
+      const releaseLayerObservers = request.releaseLayerObservers;
+      request.releaseLayerObservers = undefined;
+      try { releaseLayerObservers?.(); }
+      catch (cleanupError) { this.reportTimeLayerCleanupError(request, cleanupError); }
       if (this.activeTimeRequest === request) {
         this.activeTimeRequest = undefined;
-        const next = this.pendingTimeRequest;
-        this.pendingTimeRequest = undefined;
+        this.mollGpuActive = false;
+        const next = this.prefetchedTimeRequest ?? this.pendingTimeRequest;
+        if (this.prefetchedTimeRequest) this.prefetchedTimeRequest = undefined;
+        else this.pendingTimeRequest = undefined;
         if (next) {
           this.activeTimeRequest = next;
-          void this.runRectangleTime(next, generation);
+          void this.runTime(next, generation);
         }
       }
     }
   }
 
-  private cancelTimeRequests(): void {
-    const error = new AgentActionBusyError("Superseded by a newer projection request.");
-    this.activeTimeRequest?.reject(error);
+  private prefetchMollTime(): void {
+    if (this.activeModeId !== "mollweide" || !this.mollGpuActive || this.prefetchedTimeRequest || !this.pendingTimeRequest) return;
+    const next = this.pendingTimeRequest;
+    this.pendingTimeRequest = undefined;
+    this.prefetchedTimeRequest = next;
+    next.prepared = this.host.plateRenderer.prepareRectangleFrame(next.ageMa, this.host.rotationModel, "mollweide");
+    // The promoted ticket cannot be overwritten by later input. Its failure is
+    // consumed by runTime after the preceding actual render settles.
+    void next.prepared.catch(() => undefined);
+  }
+
+  private cancelTimeRequests(): TimeRequest | undefined {
+    const error = new OperationInterruptedError("superseded", "Superseded by a newer projection request.");
+    const active = this.activeTimeRequest;
+    if (active?.accepted) active.resolve();
+    else active?.reject(error);
     this.pendingTimeRequest?.reject(error);
+    this.prefetchedTimeRequest?.reject(error);
     this.activeTimeRequest = undefined;
     this.pendingTimeRequest = undefined;
+    this.prefetchedTimeRequest = undefined;
+    this.mollGpuActive = false;
+    if (!active?.accepted) active?.abortController.abort(error);
+    return active;
+  }
+
+  private captureTimeLayers(request: TimeRequest, generation: number, mode: ProjectionModeId): void {
+    let rejectFailure!: (error: Error) => void;
+    request.layerFailure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
+    // Capture and native subscriptions can fail synchronously, before runTime races it.
+    void request.layerFailure.catch(() => undefined);
+    const fail = (error: unknown): void => {
+      if (request.accepted || request.failure) return;
+      request.failure = error instanceof Error ? error : new Error(String(error));
+      rejectFailure(request.failure);
+      if (this.activeTimeRequest === request && generation === this.requestGeneration) this.cancelRenderWaiter(request.failure);
+    };
+    const onFailure = (error: unknown): void => {
+      if (this.activeTimeRequest === request && generation === this.requestGeneration) fail(error);
+    };
+    const abort = () => fail(request.abortController.signal.reason);
+    request.abortController.signal.addEventListener("abort", abort, { once: true });
+    let removeRenderError = () => {};
+    request.releaseLayerObservers = () => {
+      try { request.abortController.signal.removeEventListener("abort", abort); }
+      finally { removeRenderError(); }
+    };
+    if (!this.host.captureTimeLayers) return;
+    removeRenderError = this.host.viewer.scene.renderError.addEventListener((_scene: unknown, error: unknown) => onFailure(error));
+    request.layers = this.host.captureTimeLayers({
+      owner: request.owner, generation, ageMa: request.ageMa, mode,
+      signal: request.abortController.signal, onFailure,
+    });
+    void request.layers.ready.catch(onFailure);
+  }
+
+  private assertTimeOwner(request: TimeRequest | undefined, generation: number): void {
+    if (generation !== this.requestGeneration || (request && this.activeTimeRequest !== request)) {
+      throw new OperationInterruptedError("superseded", "Superseded by a newer request.");
+    }
+    if (request?.failure) throw request.failure;
+  }
+
+  private rollbackTimeLayers(request?: TimeRequest): void {
+    if (!request?.layers || request.accepted || request.layersRolledBack) return;
+    request.layersRolledBack = true;
+    request.layers.rollback();
+  }
+
+  /** Attempt every retained restoration even when one native cleanup throws. */
+  private cancelPreparedFrame(request?: TimeRequest, discardPrepared = false, generation?: number, preservePrepared = false): void {
+    const epoch = this.requestGeneration;
+    const globeOwner = generation ?? this.globeFrameOwner;
+    const swapOwner = generation ?? this.swap?.owner;
+    let failure: unknown;
+    let failed = false;
+    for (const restore of [
+      () => { if (!preservePrepared && epoch === this.requestGeneration) this.host.plateRenderer.cancelRectanglePreparation(discardPrepared); },
+      () => { if (epoch === this.requestGeneration) this.host.plateRenderer.cancelRectangleStaging(); },
+      () => this.rollbackTimeLayers(request),
+      () => { if (globeOwner !== undefined) this.rollbackGlobeFrame(globeOwner); },
+      () => { if (swapOwner !== undefined) this.rollbackSwap(swapOwner); },
+    ]) {
+      try { restore(); } catch (error) { failed = true; failure = error; }
+    }
+    if (failed) throw failure;
+  }
+
+  private reportTimeLayerCleanupError(request: TimeRequest, error: unknown): void {
+    request.cleanupError = error;
+    try { this.host.onTimeLayerCleanupError?.(error); }
+    catch (diagnosticError) { request.cleanupError = diagnosticError; }
+  }
+
+  private acceptTimeFrame(request: TimeRequest, ageMa: number, counts: ProjectionTimeCounts, swapOwner: number): void {
+    this.assertTimeOwner(request, request.generation!);
+    request.layers?.accept();
+    this.assertTimeOwner(request, request.generation!);
+    request.accepted = true;
+    this.globeFrameOwner = undefined;
+    this.committedTimeMa = ageMa;
+    this.committedTimeState = counts;
+    // The displayed frame is now fact. Retirement/notification cannot undo it.
+    for (const finish of [
+      () => this.confirmSwap(swapOwner),
+      () => request.layers?.retire(),
+      () => this.host.onCommittedTimeChange(ageMa),
+    ]) {
+      try { finish(); } catch (error) { this.reportTimeLayerCleanupError(request, error); }
+    }
   }
 
   /** Mode-aware home: the full map when the scene is 2D, the globe view otherwise. */
   home(): void {
-    if (this.morphedModeId === "rectangle") {
-      this.setRectangleCamera();
+    if (this.morphedModeId !== "globe") {
+      if (this.flatCamera) this.flatCamera.home();
+      else this.setRectangleCamera();
     } else {
       this.host.globeHome();
     }
   }
 
+  zoom(factor: unknown) {
+    if (typeof factor !== "number" || !Number.isFinite(factor) || factor < 0.01 || factor > 100) {
+      throw new AgentActionValidationError("factor must be finite and within [0.01, 100].");
+    }
+    return this.requireFlatCamera().zoom(factor);
+  }
+
+  pan(deltaX: unknown, deltaY: unknown) {
+    if (typeof deltaX !== "number" || typeof deltaY !== "number" ||
+      !Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX) > 100000 || Math.abs(deltaY) > 100000) {
+      throw new AgentActionValidationError("deltaX and deltaY must be finite CSS pixels within [-100000, 100000].");
+    }
+    return this.requireFlatCamera().panBy(deltaX, deltaY);
+  }
+
+  private requireFlatCamera(): FlatMapCamera {
+    this.assertSourceCurrent();
+    if (this.morphedModeId === "globe" || !this.flatCamera) {
+      throw new AgentActionUnsupportedError("camera.zoom/pan support flat projections only.");
+    }
+    return this.flatCamera;
+  }
+
+  /** Shared guard for the existing globe-only GPU point loader. */
+  assertGlobeRuntimeAvailable(): void {
+    this.assertSourceCurrent();
+    if (this.status === "preparing") {
+      throw new AgentActionBusyError("Wait for the projection transition to finish before loading points.");
+    }
+    if (this.activeModeId !== "globe" || this.morphedModeId !== "globe") {
+      throw new AgentActionUnsupportedError("Points require the Globe projection in this build.");
+    }
+  }
+
   /**
    * Rejects a layer mutation that would make a rectangle-incompatible layer
-   * effective-visible while rectangle is active or pending. The caller passes
+   * effective-visible while a flat mode is active, pending, or still committed
+   * during an unconfirmed return to Globe. The caller passes
    * the layers and groups *as they would be after the change*; effective
-   * visibility is `layer.active && group.active`, so a child whose parent group
+   * visibility includes every ancestor, so a child whose parent group
    * stays hidden is correctly not treated as shown. On throw nothing has been
    * applied yet, so runtime and persistence are unchanged. Turning a layer off
    * or keeping it under a hidden group is always allowed.
@@ -404,20 +759,30 @@ export class ProjectionController {
     layers: readonly ProjectionLayerRow[],
     groups: readonly ProjectionGroupRow[],
   ): void {
-    if (this.activeModeId !== "rectangle") {
+    // The requested Globe frame can still fail or roll back to its retained
+    // flat predecessor. Keep that predecessor's constraint until Globe commits.
+    const constraintMode = this.activeModeId === "globe" ? this.committedId : this.activeModeId;
+    if (constraintMode === "globe") {
       return;
     }
-    const groupActive = new Map(groups.map((group) => [group.id, group.active]));
+    const groupById = new Map(groups.map(group => [group.id, group]));
     for (const layer of layers) {
       if (!this.host.incompatibleLayerIds.includes(layer.id)) {
         continue;
       }
-      const effective = layer.active && (groupActive.get(layer.groupId) ?? true);
+      let effective = layer.active;
+      const visited = new Set<number>();
+      for (let group = groupById.get(layer.groupId); effective && group;
+        group = group.parentId === undefined ? undefined : groupById.get(group.parentId)) {
+        if (visited.has(group.id)) throw new AgentActionValidationError("Layer groups must not contain a cycle.");
+        visited.add(group.id);
+        effective = group.active;
+      }
       if (effective) {
         throw new AgentActionValidationError(
           `Layer ${this.host.describeLayer(
             layer.id,
-          )} cannot be shown while the Rectangle projection is active. Switch back to Globe first.`,
+          )} cannot be shown while the ${constraintMode === "mollweide" ? "Mollweide" : "Rectangle"} projection is active. Switch back to Globe first.`,
         );
       }
     }
@@ -431,26 +796,142 @@ export class ProjectionController {
    */
   refreshCapabilities(): void {
     if (
-      this.activeModeId === "rectangle" && this.status === "preparing" &&
+      this.activeModeId !== "globe" && this.status === "preparing" &&
       this.blockingLayers().length > 0
     ) {
-      this.destroy();
-      this.status = "error";
-      this.requestedTimeMa = this.committedTimeMa;
-      this.lastError = this.toError(new AgentActionUnsupportedError(
-        "Rectangle projection has incompatible visible layers.",
-      ));
+      // Invalidate before native cleanup/restoration: either can throw while
+      // the old postRender would otherwise still be allowed to commit.
+      const generation = ++this.requestGeneration;
+      const cancelledTime = this.cancelTimeRequests();
+      if (generation !== this.requestGeneration) {
+        this.rollbackTimeLayers(cancelledTime);
+        return;
+      }
+      this.cancelRenderWaiter();
+      try {
+        this.cancelPreparedFrame(cancelledTime);
+        if (generation !== this.requestGeneration) return;
+        this.host.setGlobeInertiaEnabled(this.morphedModeId === "globe");
+        this.status = "error";
+        this.requestedTimeMa = this.committedTimeMa;
+        this.lastError = this.toError(new AgentActionUnsupportedError(
+          `${this.activeModeId === "mollweide" ? "Mollweide" : "Rectangle"} projection has incompatible visible layers.`,
+        ));
+      } catch (error) {
+        this.reportInterruptedFailure(error);
+        throw error;
+      }
     }
     this.publish();
   }
 
+  /** A source selection reload keeps the old picture, but cannot commit old work. */
+  invalidateSource(): void {
+    if (this.sourceInvalidated) return;
+    this.sourceInvalidated = true;
+    this.requestGeneration += 1;
+    const cancelledTime = this.cancelTimeRequests();
+    this.cancelRenderWaiter();
+    this.rollbackInterruptedView(cancelledTime, true);
+    this.activeModeId = this.morphedModeId;
+    this.requestedId = this.committedId;
+    this.requestedTimeMa = this.committedTimeMa;
+    this.status = "error";
+    this.lastError = this.toError(new AgentActionBusyError("Plate source changed; reload is required."));
+    this.host.setGlobeInertiaEnabled(this.morphedModeId === "globe");
+    this.publish();
+  }
+
+  private assertSourceCurrent(): void {
+    if (this.sourceInvalidated) throw new AgentActionBusyError("Plate source changed or runtime disposed; reload is required.");
+  }
+
   /** Cancels any in-flight work; called when the renderer is torn down. */
   destroy(): void {
+    // Close entry points before any native cleanup can throw.
+    this.sourceInvalidated = true;
     this.requestGeneration += 1;
-    this.cancelTimeRequests();
-    this.host.plateRenderer.cancelRectanglePreparation();
+    const cancelledTime = this.cancelTimeRequests();
     this.cancelRenderWaiter();
-    this.host.plateRenderer.cancelRectangleStaging();
+    try {
+      this.cancelPreparedFrame(cancelledTime, true);
+    } catch (error) {
+      this.reportInterruptedFailure(error);
+      throw error;
+    } finally {
+      this.flatCamera?.destroy();
+    }
+  }
+
+  /** The caller has already invalidated tickets and removed their waiter. */
+  private rollbackInterruptedView(request?: TimeRequest, discardPrepared = false): void {
+    const generation = this.requestGeneration;
+    try {
+      this.cancelPreparedFrame(request, discardPrepared);
+    } catch (error) {
+      // A failed restoration is observable, never a successful cancellation.
+      if (generation === this.requestGeneration) this.reportInterruptedFailure(error);
+      else if (request) this.reportTimeLayerCleanupError(request, error);
+      throw error;
+    }
+  }
+
+  private reportInterruptedFailure(error: unknown): void {
+    this.activeModeId = this.morphedModeId;
+    this.requestedId = this.committedId;
+    this.requestedTimeMa = this.committedTimeMa;
+    this.status = "error";
+    this.lastError = this.toError(error);
+    this.publish();
+  }
+
+  private rollbackGlobeFrame(generation?: number): void {
+    if (this.globeFrameOwner === undefined || (generation !== undefined && this.globeFrameOwner !== generation)) return;
+    this.globeFrameOwner = undefined;
+    // A retained flat swap owns restoration across a mode change. Otherwise
+    // the public host update restores both the plate and point transforms.
+    if (!this.swap && this.committedId === "globe" && !reportsSceneDestroyed(this.host.viewer.scene)) {
+      this.host.applyGlobeFrame(this.committedTimeMa);
+      this.resumeRenderLoop();
+      this.host.viewer.scene.requestRender();
+    }
+  }
+
+  private beginSwap(generation: number): void {
+    if (!this.flatCamera) return;
+    if (this.swap) {
+      this.swap.owner = generation;
+      return;
+    }
+    this.swap = { generation, owner: generation, camera: this.flatCamera.capture(), mode: this.morphedModeId };
+    this.host.plateRenderer.beginFlatSwap(generation);
+  }
+  private rollbackSwap(generation?: number): void {
+    const swap = this.swap;
+    if (!swap || (generation !== undefined && generation !== swap.owner)) return;
+    this.swap = undefined;
+    this.host.plateRenderer.rollbackFlatSwap(swap.generation);
+    this.flatCamera!.restore(swap.camera);
+    this.morphedModeId = swap.mode;
+    this.host.setGlobeInertiaEnabled(swap.mode === "globe");
+    if (swap.mode === "globe") this.host.applyGlobeFrame(this.committedTimeMa);
+    // CesiumWidget stops its public render loop on renderError. The target
+    // resources are gone and the prior confirmed frame is restored, so render
+    // that old frame again. A genuinely lost context can still fail normally.
+    this.resumeRenderLoop();
+  }
+
+  private resumeRenderLoop(): void {
+    if (this.host.viewer.useDefaultRenderLoop === false && !reportsSceneDestroyed(this.host.viewer.scene)) {
+      this.host.viewer.useDefaultRenderLoop = true;
+      this.host.viewer.scene.requestRender();
+    }
+  }
+  private confirmSwap(generation: number): void {
+    if (this.swap?.owner !== generation) return;
+    const swap = this.swap;
+    this.swap = undefined;
+    this.host.plateRenderer.confirmFlatSwap(swap.generation);
   }
 
   // --- transaction --------------------------------------------------------
@@ -463,50 +944,81 @@ export class ProjectionController {
     mode: ProjectionModeId,
     ageMa: number,
     generation: number,
+    prepared?: Promise<Awaited<ReturnType<PlateRenderer["prepareRectangleFrame"]>>>,
+    retainForCancellation = false,
+    onFrameConfirmed?: () => void,
+    timeRequest?: TimeRequest,
   ): Promise<void> {
+    // An explicit retry must not wait forever on a loop stopped by CesiumWidget.
+    this.resumeRenderLoop();
     // A newer request supersedes any render we were still waiting to confirm;
     // reject it now instead of leaving it parked on a frame that may never come.
     this.cancelRenderWaiter();
     const needsMorph = this.morphedModeId !== mode;
 
-    if (mode === "rectangle") {
+    if (mode !== "globe") {
       this.host.plateRenderer.cancelRectangleStaging();
       if (needsMorph) {
-        if (this.morphedModeId === "globe") {
-          this.host.captureGlobeCamera();
-        }
         this.host.setGlobeInertiaEnabled(false);
       }
-      const handle = await this.host.plateRenderer.prepareRectangleFrame(
+      const handle = await this.awaitPreparation(() => prepared ?? this.host.plateRenderer.prepareRectangleFrame(
         ageMa,
         this.host.rotationModel,
-      );
+        mode,
+      ));
       if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded by a newer request.");
+        throw new OperationInterruptedError("superseded", "Superseded by a newer request.");
       }
-      await this.host.plateRenderer.stageRectangleFrame(handle, generation);
+      this.assertTimeOwner(timeRequest, generation);
+      this.resumeRenderLoop();
+      const staged = this.host.plateRenderer.stageRectangleFrame(handle, generation);
+      if (mode === "mollweide" && this.activeTimeRequest) {
+        this.mollGpuActive = true;
+        this.prefetchMollTime();
+      }
+      await staged;
       if (generation !== this.requestGeneration) {
         // The new epoch already cancelled this staging. Do not cancel a
         // replacement frame that may now occupy the renderer's staging slot.
-        throw new AgentActionBusyError("Superseded by a newer request.");
+        throw new OperationInterruptedError("superseded", "Superseded by a newer request.");
       }
+      if (timeRequest?.layers) await timeRequest.layers.ready;
+      this.assertTimeOwner(timeRequest, generation);
       // Final capability recheck on the *effective* visible layers, right before
       // the irreversible commit: a layer turned on while this frame warmed up
       // must abort the switch, not silently ship a mis-projected view.
-      this.assertRectangleCapability();
-      this.host.plateRenderer.commitRectangleFrame(generation);
+      this.assertRectangleCapability(mode);
+      // Capture only when the staged target is actually leaving Globe. A long
+      // preparation can outlive native camera settling or fail without a swap.
+      if (needsMorph && this.morphedModeId === "globe") this.host.captureGlobeCamera();
+      if (retainForCancellation || mode === "mollweide" || this.morphedModeId === "mollweide") this.beginSwap(generation);
+      this.host.plateRenderer.commitRectangleFrame(generation, mode);
+      timeRequest?.layers?.activate();
+      this.assertTimeOwner(timeRequest, generation);
       if (needsMorph) {
-        this.host.viewer.scene.morphTo2D(0);
-        this.morphedModeId = "rectangle";
-        this.setRectangleCamera();
+        if (this.flatCamera) this.flatCamera.setMode(mode);
+        else {
+          this.host.viewer.scene.morphTo2D(0);
+          this.setRectangleCamera();
+        }
+        this.morphedModeId = mode;
       }
       // Hold the committed time/counts and the host notification until a real
       // render confirms the frame, so a failed confirmation never reports a time
       // that did not actually render (and never rolls back a newer request).
-      await this.awaitNextRender(generation);
+      await this.awaitNextRender(generation, timeRequest);
       if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded before the view rendered.");
+        throw new OperationInterruptedError("superseded", "Superseded before the view rendered.");
       }
+      this.assertTimeOwner(timeRequest, generation);
+      if (timeRequest) {
+        this.acceptTimeFrame(timeRequest, ageMa, handle.timeState, generation);
+        return;
+      }
+      // Once the confirmed frame releases its predecessor, cancellation can no
+      // longer restore that predecessor. Publish the rest of this commit atomically.
+      onFrameConfirmed?.();
+      this.confirmSwap(generation);
       this.committedTimeMa = ageMa;
       this.committedTimeState = handle.timeState;
       this.host.onCommittedTimeChange(ageMa);
@@ -514,29 +1026,96 @@ export class ProjectionController {
     }
 
     // globe
+    if (timeRequest?.layers) await timeRequest.layers.ready;
+    this.assertTimeOwner(timeRequest, generation);
     if (needsMorph) {
       this.host.plateRenderer.cancelRectangleStaging();
+      if (retainForCancellation || this.morphedModeId === "mollweide") this.beginSwap(generation);
       this.host.plateRenderer.restoreGlobeFrame();
       const globeCounts = this.host.applyGlobeFrame(ageMa);
+      timeRequest?.layers?.activate();
+      this.assertTimeOwner(timeRequest, generation);
       this.host.setGlobeInertiaEnabled(true);
-      this.host.viewer.scene.morphTo3D(0);
+      if (this.flatCamera) this.flatCamera.setMode("globe");
+      else this.host.viewer.scene.morphTo3D(0);
       this.morphedModeId = "globe";
       this.host.restoreGlobeCamera();
-      await this.awaitNextRender(generation);
+      await this.awaitNextRender(generation, timeRequest);
       if (generation !== this.requestGeneration) {
-        throw new AgentActionBusyError("Superseded before the view rendered.");
+        throw new OperationInterruptedError("superseded", "Superseded before the view rendered.");
       }
+      this.assertTimeOwner(timeRequest, generation);
+      if (timeRequest) {
+        this.acceptTimeFrame(timeRequest, ageMa, globeCounts, generation);
+        return;
+      }
+      onFrameConfirmed?.();
+      this.confirmSwap(generation);
       this.committedTimeMa = ageMa;
       this.committedTimeState = globeCounts;
       this.host.onCommittedTimeChange(ageMa);
       return;
     }
-    // Globe fast path: the synchronous updateTime already applied the frame, so
-    // there is nothing to confirm with a render.
+    // Globe updates are synchronous, but committing their age/counts still
+    // requires the same real-frame evidence as a prepared flat frame.
     this.host.plateRenderer.cancelRectangleStaging();
-    this.committedTimeState = this.host.applyGlobeFrame(ageMa);
+    this.host.setGlobeInertiaEnabled(true);
+    this.globeFrameOwner = generation;
+    const globeCounts = this.host.applyGlobeFrame(ageMa);
+    timeRequest?.layers?.activate();
+    this.assertTimeOwner(timeRequest, generation);
+    await this.awaitNextRender(generation, timeRequest);
+    if (generation !== this.requestGeneration) {
+      throw new OperationInterruptedError("superseded", "Superseded before the view rendered.");
+    }
+    this.assertTimeOwner(timeRequest, generation);
+    if (timeRequest) {
+      this.acceptTimeFrame(timeRequest, ageMa, globeCounts, this.swap?.owner ?? generation);
+      return;
+    }
+    this.globeFrameOwner = undefined;
+    onFrameConfirmed?.();
+    // A superseding Globe time accepts the already-morphed view. Retire the
+    // predecessor's retained flat frame using its owning token before reporting
+    // this newer success; that stale token must never roll it back later.
+    if (this.swap) this.confirmSwap(this.swap.owner);
     this.committedTimeMa = ageMa;
+    this.committedTimeState = globeCounts;
     this.host.onCommittedTimeChange(ageMa);
+  }
+
+  /** CPU preparation also belongs to the render transaction: the old frame can
+   * fail while the Worker is busy, stopping Widget before GPU warm-up begins.
+   * Settle immediately with that render error, and never stage a late CPU result.
+   * Reuse the waiter slot so mode/source cancellation removes this listener too.
+   */
+  private awaitPreparation(
+    prepare: () => ReturnType<PlateRenderer["prepareRectangleFrame"]>,
+  ): ReturnType<PlateRenderer["prepareRectangleFrame"]> {
+    return new Promise((resolve, reject) => {
+      const token = {};
+      let settled = false;
+      let remove = () => {};
+      const finish = (error?: Error, handle?: Awaited<ReturnType<PlateRenderer["prepareRectangleFrame"]>>) => {
+        if (settled) return;
+        settled = true;
+        remove();
+        if (this.renderWaiter?.token === token) this.renderWaiter = undefined;
+        if (error) reject(error);
+        else resolve(handle!);
+      };
+      remove = this.host.viewer.scene.renderError.addEventListener((_scene: unknown, error: unknown) => {
+        // Reject before cancellation can deliver AbortError: preserve the 500.
+        finish(error instanceof Error ? error : new Error(String(error)));
+        this.host.plateRenderer.cancelRectanglePreparation();
+      });
+      this.renderWaiter = { token, remove: () => remove(), reject: error => finish(error) };
+      try {
+        void prepare().then(handle => finish(undefined, handle), error => finish(error));
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   /** Publishes a committed view: bumps revision only when the mode changed. */
@@ -545,7 +1124,7 @@ export class ProjectionController {
       this.revision += 1;
       this.committedId = mode;
     }
-    this.status = this.pendingTimeRequest ? "preparing" : "ready";
+    this.status = this.pendingTimeRequest || this.prefetchedTimeRequest ? "preparing" : "ready";
     this.lastError = undefined;
     this.publish();
   }
@@ -564,14 +1143,14 @@ export class ProjectionController {
    * leaves a promise parked on a frame that may never arrive. The token check
    * keeps an old waiter's settle from clearing a newer one.
    */
-  private cancelRenderWaiter(): void {
+  private cancelRenderWaiter(error: Error = new OperationInterruptedError("superseded", "Superseded before the view rendered.")): void {
     const waiter = this.renderWaiter;
     if (!waiter) {
       return;
     }
     this.renderWaiter = undefined;
-    waiter.remove();
-    waiter.reject(new AgentActionBusyError("Superseded before the view rendered."));
+    // The waiter's settle path owns listener removal on both success and failure.
+    waiter.reject(error);
   }
 
   /**
@@ -579,18 +1158,22 @@ export class ProjectionController {
    * a render error fires. The waiter is stored so a new request or destroy can
    * reject it without waiting for that frame.
    */
-  private awaitNextRender(generation: number): Promise<void> {
+  private awaitNextRender(generation: number, timeRequest?: TimeRequest, timeoutMs?: number): Promise<void> {
+    if (reportsSceneDestroyed(this.host.viewer.scene)) return Promise.reject(new Error("The scene was destroyed before the frame rendered."));
+    this.resumeRenderLoop();
     return new Promise<void>((resolve, reject) => {
       const scene = this.host.viewer.scene;
       const token = {};
       let settled = false;
       let removePostRender: () => void = () => {};
       let removeRenderError: () => void = () => {};
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = (error?: Error): void => {
         if (settled) {
           return;
         }
         settled = true;
+        clearTimeout(timer);
         // Only clear the slot if it is still this waiter; a newer request may
         // already own it.
         if (this.renderWaiter?.token === token) {
@@ -607,11 +1190,22 @@ export class ProjectionController {
       removePostRender = scene.postRender.addEventListener(() => {
         if (
           generation !== this.requestGeneration ||
+          (timeRequest && this.activeTimeRequest !== timeRequest) ||
           reportsSceneDestroyed(scene)
         ) {
           settle(
-            new AgentActionBusyError("Superseded before the view rendered."),
+            new OperationInterruptedError("superseded", "Superseded before the view rendered."),
           );
+          return;
+        }
+        try {
+          this.assertTimeOwner(timeRequest, generation);
+          if (timeRequest?.layers && !timeRequest.layers.canConfirm()) {
+            scene.requestRender();
+            return;
+          }
+        } catch (error) {
+          settle(error instanceof Error ? error : new Error(String(error)));
           return;
         }
         settle();
@@ -625,19 +1219,22 @@ export class ProjectionController {
         token,
         reject: (error: Error) => settle(error),
         remove: () => {
+          clearTimeout(timer);
           removePostRender();
           removeRenderError();
         },
       };
-      scene.requestRender();
+      if (timeoutMs !== undefined) timer = setTimeout(() => settle(new Error(`The restored frame did not render within ${timeoutMs}ms.`)), timeoutMs);
+      try { scene.requestRender(); }
+      catch (error) { settle(error instanceof Error ? error : new Error(String(error))); }
     });
   }
 
-  private assertRectangleCapability(): void {
+  private assertRectangleCapability(mode: "rectangle" | "mollweide"): void {
     const blocking = this.blockingLayers();
     if (blocking.length > 0) {
       throw new AgentActionUnsupportedError(
-        `Rectangle projection cannot show: ${blocking
+        `${mode === "mollweide" ? "Mollweide" : "Rectangle"} projection cannot show: ${blocking
           .map((id) => this.host.describeLayer(id))
           .join(", ")}. Turn those layers off first.`,
       );
@@ -666,9 +1263,9 @@ export class ProjectionController {
         reason: rectangleReason,
       },
       {
-        available: false,
+        available: blocking.length === 0,
         projectionId: "mollweide",
-        reason: "Mollweide projection is not implemented yet.",
+        reason: rectangleReason,
       },
     ];
   }
