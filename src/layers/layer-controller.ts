@@ -1,9 +1,11 @@
 import type { PointStyleExpression } from "@timemachine/point-runtime";
+import type { NativeLineStyle } from "./native-line-style";
+import type { NativePolygonStyle } from "./native-polygon-style";
 
 import {
   AgentActionValidationError,
 } from "../agent-actions/registry";
-import type { ProjectSession } from "../project/project-session";
+import type { ProjectLayerGroupSnapshot, ProjectSession } from "../project/project-session";
 
 /**
  * The renderer side of a layer edit. Implemented by `main.ts`, which owns the
@@ -37,6 +39,34 @@ export class LayerController {
     private readonly session: ProjectSession,
     private readonly runtime: LayerRuntimeAdapter,
   ) {}
+
+  addGroup(input: Omit<ProjectLayerGroupSnapshot, "id">): number {
+    let id: number;
+    try { id = this.session.addGroup(input); }
+    catch (error) { throw new AgentActionValidationError(error instanceof Error ? error.message : "Invalid group."); }
+    this.runtime.publishState();
+    this.runtime.persist();
+    return id;
+  }
+
+  moveGroup(id: number, parentId?: number): void {
+    this.requireGroup(id);
+    if (parentId !== undefined) this.requireGroup(parentId);
+    try { this.session.moveGroup(id, parentId); }
+    catch (error) { throw new AgentActionValidationError(error instanceof Error ? error.message : "Invalid group move."); }
+    this.runtime.syncNativeControls();
+    this.applyGroupMembers(id);
+    this.runtime.publishState();
+    this.runtime.persist();
+  }
+
+  removeGroup(id: number): void {
+    this.requireGroup(id);
+    try { this.session.removeGroup(id); }
+    catch (error) { throw new AgentActionValidationError(error instanceof Error ? error.message : "Cannot remove group."); }
+    this.runtime.publishState();
+    this.runtime.persist();
+  }
 
   setLayerVisibility(id: number, active: boolean): void {
     this.requireLayer(id);
@@ -126,18 +156,51 @@ export class LayerController {
 
   setPointStyle(id: number, style: PointStyleExpression): void {
     this.requireLayer(id);
-    this.session.setPointStyle(id, style);
-    this.runtime.syncNativeControls();
-    this.runtime.applyRuntime(id);
+    const previous = this.session.getLayer(id)!.pointStyle;
+    this.commitStyleEdit(id,
+      () => this.session.setPointStyle(id, style),
+      () => this.session.setPointStyle(id, previous));
+  }
+
+  setLineStyle(id: number, style: NativeLineStyle): void {
+    this.requireLayer(id);
+    const previous = this.session.getLayer(id)!.lineStyle;
+    this.commitStyleEdit(id,
+      () => this.session.setLineStyle(id, style),
+      () => this.session.setLineStyle(id, previous));
+  }
+
+  setPolygonStyle(id: number, style: NativePolygonStyle): void {
+    this.requireLayer(id);
+    const previous = this.session.getLayer(id)!.polygonStyle;
+    this.commitStyleEdit(id,
+      () => this.session.setPolygonStyle(id, style),
+      () => this.session.setPolygonStyle(id, previous));
+  }
+
+  /** A failed native style application must not leave a different hidden draft. */
+  private commitStyleEdit(id: number, write: () => void, restore: () => void): void {
+    write();
+    try {
+      this.runtime.syncNativeControls();
+      this.runtime.applyRuntime(id);
+    } catch (error) {
+      const errors = [error];
+      try { restore(); } catch (failure) { errors.push(failure); }
+      try { this.runtime.syncNativeControls(); } catch (failure) { errors.push(failure); }
+      try { this.runtime.applyRuntime(id); } catch (failure) { errors.push(failure); }
+      // Publish the authoritative business value even when native recovery failed.
+      try { this.runtime.publishState(); } catch (failure) { errors.push(failure); }
+      if (errors.length > 1) throw new AggregateError(errors, "Layer style application and recovery failed.");
+      throw error;
+    }
     this.runtime.publishState();
     this.runtime.persist();
   }
 
   private applyGroupMembers(id: number): void {
-    for (const layer of this.session.layerList) {
-      if (layer.groupId === id) {
-        this.runtime.applyRuntime(layer.id);
-      }
+    for (const layerId of this.session.getGroupLayerIds(id)) {
+      this.runtime.applyRuntime(layerId);
     }
   }
 

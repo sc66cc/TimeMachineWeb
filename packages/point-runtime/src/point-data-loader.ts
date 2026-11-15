@@ -94,13 +94,13 @@ export function loadPointDataset(
   url: string,
   options: PointDatasetLoadOptions = {},
 ): Promise<LoadedPointDataset> {
+  if (options.signal?.aborted) {
+    return Promise.reject(new DOMException("Point-data load aborted.", "AbortError"));
+  }
   const cache = options.cache ?? defaultPointDatasetCache;
   const cached = cache.get(datasetId, url);
   if (cached) {
     return Promise.resolve(cached);
-  }
-  if (options.signal?.aborted) {
-    return Promise.reject(new DOMException("Point-data load aborted.", "AbortError"));
   }
   const worker = new Worker(
     new URL("./point-data-worker.ts", import.meta.url),
@@ -117,6 +117,8 @@ export function loadPointDataset(
       }
       settled = true;
       options.signal?.removeEventListener("abort", abort);
+      worker.removeEventListener("message", message);
+      worker.removeEventListener("error", error);
       worker.terminate();
       callback();
     };
@@ -125,31 +127,26 @@ export function loadPointDataset(
         reject(new DOMException("Point-data load aborted.", "AbortError")),
       );
     };
-    options.signal?.addEventListener("abort", abort, { once: true });
-    worker.addEventListener(
-      "message",
-      (event: MessageEvent<WorkerResponse>) => {
-        const data = event.data;
-        if (data.type === "loaded") {
-          const payload = data.payload;
+    const message = (event: MessageEvent<WorkerResponse>): void => {
+      const data = event.data;
+      if (data.type === "loaded") {
+        const payload = data.payload;
+        finish(() => {
           cache.set(datasetId, url, payload);
-          finish(() => resolve(payload));
-        } else {
-          const message = data.message;
-          finish(() => reject(new Error(message)));
-        }
-      },
-      { once: true },
-    );
-    worker.addEventListener(
-      "error",
-      (event) => {
-        finish(() =>
-          reject(new Error(event.message || "Point-data Worker failed.")),
-        );
-      },
-      { once: true },
-    );
+          resolve(payload);
+        });
+      } else {
+        finish(() => reject(new Error(data.message)));
+      }
+    };
+    const error = (event: ErrorEvent): void => {
+      finish(() =>
+        reject(new Error(event.message || "Point-data Worker failed.")),
+      );
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    worker.addEventListener("message", message, { once: true });
+    worker.addEventListener("error", error, { once: true });
     worker.postMessage({ type: "load", datasetId, url });
   });
 }

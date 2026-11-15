@@ -1,0 +1,20 @@
+{
+  "fixtureFormat": "synthetic-rgba-v1",
+  "displayFile": "atlas-0.svg",
+  "displayBounds": [
+    -40,
+    -40,
+    40,
+    40
+  ],
+  "capabilities": {
+    "display": true,
+    "originalNumericValues": false
+  },
+  "sampleResult": {
+    "status": "not-available",
+    "reason": "Source contains colors only; no raw numeric band or sampling service."
+  },
+  "rawValueFile": null,
+  "units": null
+}

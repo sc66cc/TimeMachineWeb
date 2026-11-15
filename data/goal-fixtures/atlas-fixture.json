@@ -1,0 +1,92 @@
+{
+  "fixtureFormat": "synthetic-atlas-v1",
+  "runtimeCompatibility": "Fixture descriptor only; not PaleoAtlasManifest. SVG display files are not WebMercator JPEG tiles; an explicit local fixture adapter is required.",
+  "frameSelection": "nearest",
+  "tieBreak": "younger",
+  "outOfRangePolicy": "hide",
+  "displayBounds": [
+    -40,
+    -40,
+    40,
+    40
+  ],
+  "displayCapabilities": {
+    "rgb": true,
+    "originalNumericValues": false
+  },
+  "rawValues": "Original values exist only in explicitly linked numeric-*.json, never inferred from image colors.",
+  "frames": [
+    {
+      "timeMa": 0,
+      "sourceId": "synthetic-atlas-0",
+      "displayFile": "atlas-0.svg",
+      "displaySha256": "b50264fd72dd23b5f4260370a25a5aba7bc75088e65704f8e235505123e112ab",
+      "displayBytes": 236,
+      "rawValueFile": "numeric-0.json"
+    },
+    {
+      "timeMa": 100,
+      "sourceId": "synthetic-atlas-100",
+      "displayFile": "atlas-100.svg",
+      "displaySha256": "153a33d177d89a017e22c02e7fa3ed0d7949062139538e918ab2181cf8ac7a66",
+      "displayBytes": 238,
+      "rawValueFile": "numeric-100.json"
+    },
+    {
+      "timeMa": 200,
+      "sourceId": "synthetic-atlas-200",
+      "displayFile": "atlas-200.svg",
+      "displaySha256": "e8002a57350888278eb38b54a5ae89e669bc13c7f32a1942366bdd119ca84280",
+      "displayBytes": 238,
+      "rawValueFile": "numeric-200.json"
+    }
+  ],
+  "selectionOracle": [
+    {
+      "requestedAgeMa": -1,
+      "expectedFrameMa": null
+    },
+    {
+      "requestedAgeMa": 0,
+      "expectedFrameMa": 0
+    },
+    {
+      "requestedAgeMa": 49,
+      "expectedFrameMa": 0
+    },
+    {
+      "requestedAgeMa": 50,
+      "expectedFrameMa": 0
+    },
+    {
+      "requestedAgeMa": 51,
+      "expectedFrameMa": 100
+    },
+    {
+      "requestedAgeMa": 100,
+      "expectedFrameMa": 100
+    },
+    {
+      "requestedAgeMa": 150,
+      "expectedFrameMa": 100
+    },
+    {
+      "requestedAgeMa": 151,
+      "expectedFrameMa": 200
+    },
+    {
+      "requestedAgeMa": 200,
+      "expectedFrameMa": 200
+    },
+    {
+      "requestedAgeMa": 201,
+      "expectedFrameMa": null
+    }
+  ],
+  "failureInjection": {
+    "id": "missing-frame-100",
+    "operation": "future adapter rejects display-file request for atlas-100.svg",
+    "expectedState": "error with requested frame 100; previous result must not be relabeled 100; retry possible",
+    "currentlyInjected": false
+  }
+}

@@ -248,6 +248,10 @@ export interface GpuPointBuildStats {
   drawCalls: number;
 }
 
+function creationAborted(): DOMException {
+  return new DOMException("Point GPU creation was aborted.", "AbortError");
+}
+
 function createQuaternionTextureData(
   width: number,
   rotationMap: ReadonlyMap<number, Quaternion>,
@@ -295,6 +299,7 @@ class GpuPointCloudPrimitive {
     DEFAULT_POINT_STYLE.singleColor,
   );
   private vertexArray: DestroyableRuntime | undefined;
+  private unownedVertexBuffer: DestroyableRuntime | undefined;
   private shaderProgram: DestroyableRuntime | undefined;
   private renderState: unknown;
   private rotationTexture: TextureRuntime | undefined;
@@ -353,7 +358,7 @@ class GpuPointCloudPrimitive {
   }
 
   update(frameState: FrameStateLike): void {
-    if (!this.show || !frameState.passes.render) {
+    if (this.destroyed || !frameState.passes.render) {
       return;
     }
     if (!this.command) {
@@ -362,10 +367,14 @@ class GpuPointCloudPrimitive {
       } catch (error) {
         this.show = false;
         this.rejectReady?.(error);
+        this.resolveReady = undefined;
         this.rejectReady = undefined;
         return;
       }
     }
+    // Hidden candidates must finish initialization without entering the draw
+    // list before the application has installed their effective visibility.
+    if (!this.show) return;
     if (this.rotationTexture && this.rotationTextureDirty) {
       this.rotationTexture.copyFrom({
         source: {
@@ -385,15 +394,39 @@ class GpuPointCloudPrimitive {
     return this.destroyed;
   }
 
+  matchesFrameState(timeMa: number, show: boolean): boolean {
+    return !this.destroyed && this.command !== undefined && this.show === show &&
+      this.timeDeciMa === timeMa * 10 && (!show || !this.rotationTextureDirty);
+  }
+
   destroy(): void {
-    this.vertexArray?.destroy();
-    this.shaderProgram?.destroy();
-    this.rotationTexture?.destroy();
-    if (this.renderState) {
-      internal.RenderState.removeFromCache(this.renderState);
-    }
-    this.sourcePayload = undefined;
     this.destroyed = true;
+    this.show = false;
+    this.rejectReady?.(creationAborted());
+    this.resolveReady = undefined;
+    this.rejectReady = undefined;
+    this.sourcePayload = undefined;
+    this.command = undefined;
+    const failures: unknown[] = [];
+    for (const key of ["unownedVertexBuffer", "vertexArray", "shaderProgram", "rotationTexture"] as const) {
+      try {
+        this[key]?.destroy();
+        this[key] = undefined;
+      } catch (error) {
+        // Keep only the failed handle for an explicit cleanup retry. A failed
+        // release must not skip the other resources or make the object render.
+        failures.push(error);
+      }
+    }
+    if (this.renderState) {
+      try {
+        internal.RenderState.removeFromCache(this.renderState);
+        this.renderState = undefined;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, "Point GPU resource cleanup failed.");
   }
 
   private initialize(frameState: FrameStateLike): void {
@@ -407,6 +440,8 @@ class GpuPointCloudPrimitive {
       typedArray: payload,
       usage: internal.BufferUsage.STATIC_DRAW,
     });
+    // VertexArray owns the buffer only after its constructor succeeds.
+    this.unownedVertexBuffer = vertexBuffer;
 
     const attributeLocations = {
       position: 0,
@@ -451,6 +486,7 @@ class GpuPointCloudPrimitive {
         },
       ],
     });
+    this.unownedVertexBuffer = undefined;
 
     this.shaderProgram = internal.ShaderProgram.fromCache({
       context: frameState.context,
@@ -558,17 +594,97 @@ export class GpuPointRenderer {
     dataset: LoadedPointDataset,
     timeMa: number,
     rotationMap: ReadonlyMap<number, Quaternion>,
+    options: {
+      signal?: AbortSignal;
+      show?: boolean;
+      onCleanupError?: (error: unknown) => void;
+      onCleanupPending?: (resource: { destroy(): void }) => void;
+    } = {},
   ): Promise<GpuPointRenderer> {
+    const signal = options.signal;
+    const scene = viewer.scene;
+    if (signal?.aborted || scene.isDestroyed() || scene.primitives.isDestroyed()) throw creationAborted();
     const primitive = new GpuPointCloudPrimitive(viewer, dataset);
-    primitive.setTime(timeMa, rotationMap);
-    viewer.scene.primitives.add(primitive as unknown as Primitive);
-    viewer.scene.requestRender();
+    primitive.show = options.show ?? true;
+    let ownershipLost = false;
+    let onAbort!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        ownershipLost = true;
+        reject(creationAborted());
+      };
+    });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      deadline = setTimeout(() => reject(new Error("Point GPU initialization did not complete within 30 seconds.")), 30_000);
+    });
+    const ready = Promise.race([primitive.ready, cancelled, timedOut]);
+    const assertOwner = (): void => {
+      if (signal?.aborted || ownershipLost || scene.isDestroyed() || scene.primitives.isDestroyed() ||
+          primitive.isDestroyed() || !scene.primitives.contains(primitive as unknown as Primitive)) throw creationAborted();
+    };
+    let removeCollectionListener: (() => void) | undefined;
+    const reportCleanupError = (error: unknown): void => {
+      try { void Promise.resolve(options.onCleanupError?.(error)).catch(() => undefined); }
+      catch { /* diagnostics must not replace the creation result */ }
+    };
+    // The caller only receives this handle after cleanup has actually failed.
+    // Retry destroy even when isDestroyed is already true: that flag stops
+    // drawing, while the primitive retains failed native resources for retry.
+    const pendingRelease = { destroy(): void {
+      const failures: unknown[] = [];
+      try {
+        if (!viewer.scene.primitives.isDestroyed()) viewer.scene.primitives.remove(primitive as unknown as Primitive);
+      } catch (error) { failures.push(error); }
+      try { primitive.destroy(); } catch (error) { failures.push(error); }
+      if (failures.length) throw new AggregateError(failures, "Point GPU cleanup retry failed.");
+    } };
+    // A native add/requestRender can throw before the await. Cleanup still
+    // rejects the owned ready promise, which must not become unhandled.
+    void ready.catch(() => undefined);
     try {
-      const buildStats = await primitive.ready;
+      signal?.addEventListener("abort", onAbort, { once: true });
+      // Removal loses this creation's ownership even when the collection was
+      // configured not to destroy primitives. The candidate is still ours.
+      removeCollectionListener = viewer.scene.primitives.primitiveRemoved.addEventListener(removed => {
+        if (removed === primitive) onAbort();
+      });
+      primitive.setTime(timeMa, rotationMap);
+      if (signal?.aborted || scene.isDestroyed() || scene.primitives.isDestroyed()) throw creationAborted();
+      viewer.scene.primitives.add(primitive as unknown as Primitive);
+      assertOwner();
+      // A previous draw/recovery failure stops CesiumWidget's public loop.
+      // Hidden candidates still need native update before ready can resolve.
+      if (viewer.useDefaultRenderLoop === false) viewer.useDefaultRenderLoop = true;
+      assertOwner();
+      viewer.scene.requestRender();
+      const buildStats = await ready;
+      // Ready resolution and ownership loss can occur in the same frame,
+      // before this continuation has handed the renderer to its caller.
+      assertOwner();
       return new GpuPointRenderer(viewer, primitive, buildStats);
     } catch (error) {
-      viewer.scene.primitives.remove(primitive as unknown as Primitive);
+      try {
+        try {
+          if (!viewer.scene.primitives.isDestroyed()) {
+            viewer.scene.primitives.remove(primitive as unknown as Primitive);
+          }
+        } finally {
+          if (!primitive.isDestroyed()) primitive.destroy();
+        }
+      } catch (cleanupError) {
+        try {
+          void Promise.resolve(options.onCleanupPending?.(pendingRelease)).catch(reportCleanupError);
+        } catch (pendingError) { reportCleanupError(pendingError); }
+        if (!options.onCleanupError && !options.onCleanupPending) throw cleanupError;
+        reportCleanupError(cleanupError);
+      }
       throw error;
+    } finally {
+      clearTimeout(deadline);
+      for (const remove of [() => signal?.removeEventListener("abort", onAbort), removeCollectionListener]) {
+        try { remove?.(); } catch (error) { reportCleanupError(error); }
+      }
     }
   }
 
@@ -596,13 +712,26 @@ export class GpuPointRenderer {
     this.viewer.scene.requestRender();
   }
 
+  /** Inspect the existing native owner; a caller must still wait for postRender. */
+  matchesFrameState(timeMa: number, show: boolean): boolean {
+    const scene = this.viewer.scene;
+    return Number.isFinite(timeMa) && !this.destroyed && !scene.isDestroyed() &&
+      !scene.primitives.isDestroyed() && scene.primitives.contains(this.primitive as unknown as Primitive) &&
+      this.primitive.matchesFrameState(timeMa, show);
+  }
+
   destroy(): void {
     if (this.destroyed) {
+      this.primitive.destroy();
       return;
     }
-    this.viewer.scene.primitives.remove(
-      this.primitive as unknown as Primitive,
-    );
     this.destroyed = true;
+    try {
+      if (!this.viewer.scene.primitives.isDestroyed()) {
+        this.viewer.scene.primitives.remove(this.primitive as unknown as Primitive);
+      }
+    } finally {
+      if (!this.primitive.isDestroyed()) this.primitive.destroy();
+    }
   }
 }

@@ -27,6 +27,14 @@ export interface PaleoAtlasManifest {
   frames: PaleoAtlasFrame[];
 }
 
+export type PaleoAtlasTimeResult = {
+  generation: number;
+  requestedAgeMa: number;
+} & (
+  | { status: "ready"; actualFrameAgeMa: number; sourceId: string }
+  | { status: "hidden"; reason: "disabled" | "out-of-range" }
+);
+
 export type PaleoAtlasRuntimeState =
   | {
       status: "loading";
@@ -46,7 +54,7 @@ export type PaleoAtlasRuntimeState =
   | {
       status: "error";
       requestedAgeMa: number;
-      frame: PaleoAtlasFrame;
+      frame?: PaleoAtlasFrame;
       message: string;
     };
 
@@ -81,6 +89,8 @@ export interface SingleRasterEntry {
     minimumLevel: number;
     maximumLevel: number;
     hasAlphaChannel: boolean;
+    /** Explicit Martin sparse MBTiles protocol; absent means native errors. */
+    emptyTilePolicy?: "transparent-204";
   };
   colorbar: SingleRasterColorbar | null;
 }
@@ -99,6 +109,14 @@ export interface SingleRasterManifest {
   };
   rasters: SingleRasterEntry[];
 }
+
+export type SingleRasterSelectionResult = {
+  generation: number;
+  requestedRasterId: string;
+} & (
+  | { status: "ready"; rasterId: string; sourceId: string }
+  | { status: "hidden"; reason: "disabled" }
+);
 
 export type SingleRasterRuntimeState =
   | {

@@ -1,0 +1,31 @@
+{
+  "source": "Independent longitude subtraction and modulo arithmetic; not a renderer output.",
+  "sourceFile": "shifted-seam-vectors.geojson",
+  "coordinateOrder": ["longitudeDeg", "latitudeDeg"],
+  "centralMeridianDeg": 30,
+  "seamLongitudeDeg": -150,
+  "equivalentSeamLongitudeDeg": 210,
+  "relativeLongitudeInterval": "[-180,180)",
+  "formula": "relativeLongitude=wrap(longitude-centralMeridian); wrap(a)=((a+180)%360+360)%360-180",
+  "cases": [
+    {
+      "featureId": "shifted-seam-line",
+      "expectedRelativeLongitudesDeg": [170, -170],
+      "crossesDisplaySeam": true,
+      "futureRenderingExpectation": "Two edge-side pieces with the same business feature ID; no line through the map center. Intersection latitude follows the explicitly chosen arc/segment convention, not a guessed arithmetic midpoint."
+    },
+    {
+      "featureId": "shifted-seam-polygon",
+      "expectedRelativeLongitudesDeg": [170, -170, -170, 170, 170],
+      "crossesDisplaySeam": true,
+      "futureRenderingExpectation": "Clip the source polygon at the shifted display seam while preserving area semantics and identity; no world-spanning fill. The current fixture check does not execute clipping or rendering."
+    }
+  ],
+  "control": {
+    "geographicLongitudesDeg": [-179.9, 179.9],
+    "expectedRelativeLongitudesDeg": [150.1, 149.9],
+    "crossesDisplaySeam": false,
+    "reason": "Geographic +/-180 are not the display seam when centralMeridian=30."
+  },
+  "validationScope": "GeoJSON structure and known longitude relationship only; display, clipping topology, area and picking remain unverified."
+}

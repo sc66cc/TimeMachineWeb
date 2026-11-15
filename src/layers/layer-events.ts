@@ -19,7 +19,22 @@ export const LAYER_GROUP_VISIBILITY_CHANGE_EVENT =
 
 export interface LayerStateDetail {
   groups: ProjectLayerGroupSnapshot[];
-  layers: ProjectLayerSnapshot[];
+  /** Choices from the same manifest used by the Raster runtime. */
+  rasterOptions?: Array<{ id: string; label: string }>;
+  defaultRasterId?: string;
+  /** The single supported Atlas manifest, published only after parsing succeeds. */
+  atlasSource?: { sourceRef: string; label: string };
+  layers: (ProjectLayerSnapshot & {
+    runtimeStatus?: "loading" | "ready" | "error" | "removing" | "unloaded";
+    runtimeError?: string;
+    atlasState?: {
+      status: "loading" | "ready" | "hidden" | "error";
+      requestedAgeMa: number;
+      frame: { sourceId: string; timeMa: number; label: string } | null;
+      committedFrame: { sourceId: string; timeMa: number; label: string } | null;
+      reason?: "disabled" | "out-of-range";
+    };
+  })[];
 }
 
 export interface LayerVisibilityChangeDetail {

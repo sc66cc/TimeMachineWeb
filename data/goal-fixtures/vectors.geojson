@@ -1,0 +1,487 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "origin",
+      "properties": {
+        "featureId": "origin",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "origin-other-id",
+      "properties": {
+        "featureId": "origin-other-id",
+        "plateId": 102,
+        "validTimeMa": {
+          "youngest": 25,
+          "oldest": 75,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "world-points",
+      "properties": {
+        "featureId": "world-points",
+        "plateId": 102,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "MultiPoint",
+        "coordinates": [
+          [
+            -45,
+            -30
+          ],
+          [
+            45,
+            30
+          ],
+          [
+            -179.9,
+            0
+          ],
+          [
+            179.9,
+            0
+          ],
+          [
+            -180,
+            10
+          ],
+          [
+            180,
+            -10
+          ],
+          [
+            0,
+            89
+          ],
+          [
+            0,
+            -89
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "ordinary-line",
+      "properties": {
+        "featureId": "ordinary-line",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -30,
+            10
+          ],
+          [
+            -10,
+            15
+          ],
+          [
+            20,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "seam-line",
+      "properties": {
+        "featureId": "seam-line",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            170,
+            10
+          ],
+          [
+            -170,
+            15
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "multiple-lines",
+      "properties": {
+        "featureId": "multiple-lines",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "MultiLineString",
+        "coordinates": [
+          [
+            [
+              -10,
+              -10
+            ],
+            [
+              10,
+              -10
+            ]
+          ],
+          [
+            [
+              170,
+              80
+            ],
+            [
+              -170,
+              80
+            ]
+          ],
+          [
+            [
+              -30,
+              -85
+            ],
+            [
+              30,
+              -85
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "ordinary-polygon",
+      "properties": {
+        "featureId": "ordinary-polygon",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              10,
+              10
+            ],
+            [
+              30,
+              10
+            ],
+            [
+              30,
+              30
+            ],
+            [
+              10,
+              30
+            ],
+            [
+              10,
+              10
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "polygon-hole",
+      "properties": {
+        "featureId": "polygon-hole",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -40,
+              -20
+            ],
+            [
+              -20,
+              -20
+            ],
+            [
+              -20,
+              0
+            ],
+            [
+              -40,
+              0
+            ],
+            [
+              -40,
+              -20
+            ]
+          ],
+          [
+            [
+              -35,
+              -15
+            ],
+            [
+              -35,
+              -5
+            ],
+            [
+              -25,
+              -5
+            ],
+            [
+              -25,
+              -15
+            ],
+            [
+              -35,
+              -15
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "seam-polygon",
+      "properties": {
+        "featureId": "seam-polygon",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              170,
+              -10
+            ],
+            [
+              -170,
+              -10
+            ],
+            [
+              -170,
+              10
+            ],
+            [
+              170,
+              10
+            ],
+            [
+              170,
+              -10
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "split-seam-multipolygon",
+      "properties": {
+        "featureId": "split-seam-multipolygon",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                170,
+                -30
+              ],
+              [
+                180,
+                -30
+              ],
+              [
+                180,
+                -20
+              ],
+              [
+                170,
+                -20
+              ],
+              [
+                170,
+                -30
+              ]
+            ]
+          ],
+          [
+            [
+              [
+                -180,
+                -30
+              ],
+              [
+                -170,
+                -30
+              ],
+              [
+                -170,
+                -20
+              ],
+              [
+                -180,
+                -20
+              ],
+              [
+                -180,
+                -30
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "polar-polygon",
+      "properties": {
+        "featureId": "polar-polygon",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -40,
+              80
+            ],
+            [
+              40,
+              80
+            ],
+            [
+              40,
+              85
+            ],
+            [
+              -40,
+              85
+            ],
+            [
+              -40,
+              80
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "reversed-winding-polygon",
+      "properties": {
+        "featureId": "reversed-winding-polygon",
+        "plateId": 101,
+        "validTimeMa": {
+          "youngest": 0,
+          "oldest": 100,
+          "endpoints": "inclusive"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              40,
+              10
+            ],
+            [
+              40,
+              20
+            ],
+            [
+              50,
+              20
+            ],
+            [
+              50,
+              10
+            ],
+            [
+              40,
+              10
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

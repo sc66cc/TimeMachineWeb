@@ -1,0 +1,73 @@
+{
+  "provenance": "Hand arithmetic; no application sampler used.",
+  "formula": "value(row,column,timeMa)=(8*row+column-28)/4+timeMa/100 except null corners (0,0),(7,7)",
+  "boundaryRule": "Fixture domain is west <= longitude < east, south < latitude <= north; floor((longitude+40)/10), floor((40-latitude)/10); ties on interior boundaries select east/south cell.",
+  "cases": [
+    {
+      "file": "numeric-0.json",
+      "lon": 5,
+      "lat": 5,
+      "row": 3,
+      "column": 4,
+      "expected": 0
+    },
+    {
+      "file": "numeric-0.json",
+      "lon": -25,
+      "lat": 35,
+      "row": 0,
+      "column": 1,
+      "expected": -6.75
+    },
+    {
+      "file": "numeric-0.json",
+      "lon": -35,
+      "lat": 35,
+      "row": 0,
+      "column": 0,
+      "expected": null
+    },
+    {
+      "file": "numeric-0.json",
+      "lon": 35,
+      "lat": -35,
+      "row": 7,
+      "column": 7,
+      "expected": null
+    },
+    {
+      "file": "numeric-100.json",
+      "lon": 5,
+      "lat": 5,
+      "row": 3,
+      "column": 4,
+      "expected": 1
+    },
+    {
+      "file": "numeric-200.json",
+      "lon": 5,
+      "lat": 5,
+      "row": 3,
+      "column": 4,
+      "expected": 2
+    }
+  ],
+  "outOfBounds": [
+    [
+      40,
+      0
+    ],
+    [
+      0,
+      -40
+    ],
+    [
+      -40.001,
+      0
+    ],
+    [
+      0,
+      40.001
+    ]
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "source": "Independent right-handed Cartesian matrix arithmetic; no production rotation output used as expected data.",
+  "model": "model-noncoaxial.rot",
+  "timeMa": 100,
+  "plateId": 101,
+  "anchorPlateId": 102,
+  "sourceLonLat": [0, 45],
+  "expectedLonLat": [90, -45],
+  "reversedOrderLonLat": [135, 0],
+  "toleranceDegrees": 1e-8,
+  "radiusMeters": 6371000,
+  "coordinateConvention": {
+    "angles": "longitude first, latitude second, in degrees",
+    "handedness": "right-handed; positive active rotations; column vectors",
+    "xAxis": "longitude 0 degrees, latitude 0 degrees",
+    "yAxis": "longitude 90 degrees, latitude 0 degrees",
+    "zAxis": "geographic north pole, latitude 90 degrees",
+    "projectFromOracleBasis": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "basisMapping": "The current reconstruction-core lonLatToUnitVector and Cesium world axes match this oracle basis, so B=I and R_project=B*R_oracle*inverse(B). No Unity left-handed/Y-up axis swap is applied.",
+    "quaternionMapping": "Project fields are {w,x,y,z}; Cesium constructor arguments are (x,y,z,w). This is component reordering, not a spatial change of basis."
+  },
+  "movingMatrix": [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+  "anchorInverseMatrix": [[1, 0, 0], [0, 0, 1], [0, -1, 0]],
+  "derivation": [
+    "Let s=1/sqrt(2). Source longitude0 latitude45 has vector p=(s,0,s).",
+    "Moving plate 101 has Rz(+90): (x,y,z)->(-y,x,z), hence R_moving*p=(0,s,s).",
+    "Anchor 102 has Rx(+90). Its inverse Rx(-90): (x,y,z)->(x,z,-y). Apply after the moving rotation: R_anchor^-1*R_moving*p=(0,s,-s).",
+    "atan2(y,x)=90 degrees and asin(z)=-45 degrees, giving expected longitude90 latitude-45.",
+    "The deliberately wrong order applies Rx(-90) first: p->(s,s,0), then Rz(+90)->(-s,s,0), giving longitude135 latitude0.",
+    "Both longitude and latitude differ by45 degrees between correct and reversed results, far above tolerance. The original common-axis north-pole examples cannot detect this order reversal."
+  ],
+  "validationScope": "Parser, RotationModel and Cesium matrix conversion can be checked against these independent numbers. This is not GPU/browser validation or final scientific acceptance."
+}

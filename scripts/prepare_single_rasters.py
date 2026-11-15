@@ -530,6 +530,8 @@ def main() -> None:
                 "minimumLevel": 0,
                 "maximumLevel": spec.maximum_level,
                 "hasAlphaChannel": colorbar is not None,
+                # Martin returns 204 for fully transparent tiles omitted by GDAL.
+                "emptyTilePolicy": "transparent-204",
             },
             "colorbar": None,
         }

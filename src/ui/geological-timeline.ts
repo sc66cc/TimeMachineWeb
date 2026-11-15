@@ -13,7 +13,8 @@ export interface GeologicalTimelineOptions {
   maxAgeMa: number;
   initialAgeMa?: number;
   reverse?: boolean;
-  onChange: (ageMa: number) => void;
+  onChange: (ageMa: number, signal?: AbortSignal) => void;
+  onStateChange?: (state: { ageMa: number; playing: boolean; speedMaPerSecond: number }) => void;
 }
 
 const PLAYBACK_SPEEDS = [10, 25, 50] as const;
@@ -140,7 +141,7 @@ export class GeologicalTimeline {
     this.updateControls();
   }
 
-  setAge(ageMa: number): void {
+  setAge(ageMa: number, signal?: AbortSignal): void {
     this.ageMa = clamp(
       ageMa,
       this.options.minAgeMa,
@@ -148,7 +149,8 @@ export class GeologicalTimeline {
     );
     this.elements.slider.value = String(this.ageMa);
     this.updateControls();
-    this.options.onChange(this.ageMa);
+    if (signal) this.options.onChange(this.ageMa, signal);
+    else this.options.onChange(this.ageMa);
   }
 
   private createTicks(): void {
@@ -204,6 +206,9 @@ export class GeologicalTimeline {
     this.elements.speedButton.textContent = `${
       PLAYBACK_SPEEDS[this.speedIndex]
     } Ma/s`;
+    this.options.onStateChange?.({
+      ageMa: this.ageMa, playing: this.isPlaying, speedMaPerSecond: this.speedMaPerSecond,
+    });
   }
 
   private updateAgeFromPointer(clientX: number): void {

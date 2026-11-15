@@ -1,0 +1,159 @@
+{
+  "cases": [
+    {
+      "id": "out-of-domain",
+      "expectedCode": "COORDINATE",
+      "feature": {
+        "type": "Feature",
+        "id": "bad-latitude",
+        "properties": {
+          "featureId": "bad-latitude",
+          "plateId": 101,
+          "validTimeMa": {
+            "youngest": 0,
+            "oldest": 100,
+            "endpoints": "inclusive"
+          }
+        },
+        "geometry": {
+          "type": "Point",
+          "coordinates": [
+            0,
+            91
+          ]
+        }
+      }
+    },
+    {
+      "id": "unclosed-ring",
+      "expectedCode": "RING_CLOSED",
+      "feature": {
+        "type": "Feature",
+        "id": "bad-ring",
+        "properties": {
+          "featureId": "bad-ring",
+          "plateId": 101,
+          "validTimeMa": {
+            "youngest": 0,
+            "oldest": 100,
+            "endpoints": "inclusive"
+          }
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                0,
+                0
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                10
+              ],
+              [
+                0,
+                10
+              ]
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "id": "zero-length-line",
+      "expectedCode": "DEGENERATE",
+      "feature": {
+        "type": "Feature",
+        "id": "bad-line",
+        "properties": {
+          "featureId": "bad-line",
+          "plateId": 101,
+          "validTimeMa": {
+            "youngest": 0,
+            "oldest": 100,
+            "endpoints": "inclusive"
+          }
+        },
+        "geometry": {
+          "type": "LineString",
+          "coordinates": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              0
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "id": "empty-polygon",
+      "expectedCode": "EMPTY",
+      "feature": {
+        "type": "Feature",
+        "id": "empty",
+        "properties": {
+          "featureId": "empty",
+          "plateId": 101,
+          "validTimeMa": {
+            "youngest": 0,
+            "oldest": 100,
+            "endpoints": "inclusive"
+          }
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": []
+        }
+      }
+    },
+    {
+      "id": "degenerate-ring",
+      "expectedCode": "DEGENERATE",
+      "feature": {
+        "type": "Feature",
+        "id": "collinear",
+        "properties": {
+          "featureId": "collinear",
+          "plateId": 101,
+          "validTimeMa": {
+            "youngest": 0,
+            "oldest": 100,
+            "endpoints": "inclusive"
+          }
+        },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                0,
+                0
+              ],
+              [
+                1,
+                0
+              ],
+              [
+                2,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}

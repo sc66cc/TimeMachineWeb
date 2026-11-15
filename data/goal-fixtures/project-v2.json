@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 2,
+  "name": "Synthetic legacy four-layer project",
+  "currentTimeMa": 50,
+  "savedAt": "2026-11-14T00:00:00.000Z",
+  "groups": [
+    {
+      "id": 101,
+      "name": "Data layers",
+      "active": true,
+      "alpha": 1,
+      "collapsed": false
+    },
+    {
+      "id": 102,
+      "name": "Reconstruction",
+      "active": true,
+      "alpha": 1,
+      "collapsed": false
+    }
+  ],
+  "layers": [
+    {
+      "id": 1,
+      "name": "Synthetic atlas",
+      "type": 4,
+      "groupId": 101,
+      "sourceRef": "local:paleoatlas-manifest",
+      "active": true,
+      "alpha": 1
+    },
+    {
+      "id": 2,
+      "name": "Synthetic points",
+      "type": 0,
+      "groupId": 101,
+      "sourceRef": "local:pbdb-wgp1",
+      "active": true,
+      "alpha": 1
+    },
+    {
+      "id": 3,
+      "name": "Synthetic raster",
+      "type": 3,
+      "groupId": 101,
+      "sourceRef": "local:single-raster-manifest",
+      "active": true,
+      "alpha": 0.9
+    },
+    {
+      "id": 4,
+      "name": "Synthetic plate model",
+      "type": 5,
+      "groupId": 102,
+      "sourceRef": "local:paleomap-plate-model",
+      "active": true,
+      "alpha": 1
+    }
+  ]
+}

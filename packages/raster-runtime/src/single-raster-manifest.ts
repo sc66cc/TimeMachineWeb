@@ -84,6 +84,10 @@ function parseEntry(value: unknown): SingleRasterEntry {
   if (minimumLevel < 0 || maximumLevel < minimumLevel) {
     throw new Error("SingleRaster tile level range is invalid.");
   }
+  const emptyTilePolicy = value.tiles.emptyTilePolicy;
+  if (emptyTilePolicy !== undefined && emptyTilePolicy !== "transparent-204") {
+    throw new Error("SingleRaster empty tile policy is unsupported.");
+  }
   return {
     id: requireString(value, "id"),
     label: requireString(value, "label"),
@@ -98,6 +102,7 @@ function parseEntry(value: unknown): SingleRasterEntry {
       minimumLevel,
       maximumLevel,
       hasAlphaChannel: value.tiles.hasAlphaChannel === true,
+      ...(emptyTilePolicy === undefined ? {} : { emptyTilePolicy }),
     },
     colorbar: parseColorbar(value.colorbar),
   };

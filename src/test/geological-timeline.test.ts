@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { GeologicalTimeline } from "../ui/geological-timeline";
 
-function createTimeline(reverse: boolean): {
+function createTimeline(reverse: boolean, onStateChange?: (state: { ageMa: number; playing: boolean; speedMaPerSecond: number }) => void, onChange: (ageMa: number, signal?: AbortSignal) => void = vi.fn()): {
   needle: HTMLDivElement;
   slider: HTMLInputElement;
   timeline: GeologicalTimeline;
@@ -50,7 +50,8 @@ function createTimeline(reverse: boolean): {
       initialAgeMa: 0,
       maxAgeMa: 538.8,
       minAgeMa: 0,
-      onChange: vi.fn(),
+      onChange,
+      onStateChange,
       reverse,
     },
   );
@@ -58,6 +59,32 @@ function createTimeline(reverse: boolean): {
 }
 
 describe("GeologicalTimeline", () => {
+  it("passes an API request's cancellation signal without attaching it to later native input", () => {
+    const changes: Array<{ ageMa: number; signal?: AbortSignal }> = [];
+    const { timeline, slider } = createTimeline(true, undefined, (ageMa, signal) => changes.push({ ageMa, signal }));
+    const abort = new AbortController();
+    timeline.setAge(100, abort.signal);
+    expect(changes.at(-1)).toEqual({ ageMa: 100, signal: abort.signal });
+    abort.abort();
+    slider.value = "200";
+    slider.dispatchEvent(new Event("input"));
+    expect(changes.at(-1)).toEqual({ ageMa: 200, signal: undefined });
+  });
+
+  it("notifies the same playback state for native controls and API setters", () => {
+    const states: Array<{ ageMa: number; playing: boolean; speedMaPerSecond: number }> = [];
+    const { timeline } = createTimeline(true, state => states.push(state));
+    timeline.setSpeedMaPerSecond(50);
+    expect(states.at(-1)).toMatchObject({ speedMaPerSecond: 50, playing: false });
+    document.querySelector<HTMLButtonElement>("#speed")!.click();
+    expect(states.at(-1)).toMatchObject({ speedMaPerSecond: 10 });
+    document.querySelector<HTMLButtonElement>("#play")!.click();
+    expect(states.at(-1)).toMatchObject({ playing: true });
+    timeline.setPlaying(false);
+    timeline.setAge(100);
+    expect(states.at(-1)).toEqual({ ageMa: 100, playing: false, speedMaPerSecond: 10 });
+  });
+
   it("places present day on the right for the canonical reversed scale", () => {
     const { needle, slider, timeline } = createTimeline(true);
 

@@ -1,0 +1,28 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "shifted-seam-line",
+      "properties": {
+        "featureId": "shifted-seam-line",
+        "plateId": 101,
+        "validTimeMa": { "youngest": 0, "oldest": 100, "endpoints": "inclusive" }
+      },
+      "geometry": { "type": "LineString", "coordinates": [[-160, 10], [-140, 15]] }
+    },
+    {
+      "type": "Feature",
+      "id": "shifted-seam-polygon",
+      "properties": {
+        "featureId": "shifted-seam-polygon",
+        "plateId": 101,
+        "validTimeMa": { "youngest": 0, "oldest": 100, "endpoints": "inclusive" }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-160, -10], [-140, -10], [-140, 10], [-160, 10], [-160, -10]]]
+      }
+    }
+  ]
+}

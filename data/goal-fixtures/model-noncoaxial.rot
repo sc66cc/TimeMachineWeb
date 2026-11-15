@@ -1,0 +1,4 @@
+101 0 90 0 0 0 ! Synthetic moving plate about geographic north (+Z)
+101 100 90 0 90 0
+102 0 0 0 0 0 ! Synthetic anchor about Greenwich equator (+X)
+102 100 0 0 90 0

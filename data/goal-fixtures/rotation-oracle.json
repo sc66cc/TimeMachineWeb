@@ -1,0 +1,164 @@
+{
+  "source": "Independent analytic construction, not RotationModel/CPU/GPU output",
+  "radiusMeters": 6371000,
+  "coordinateConvention": "longitude/latitude in degrees; right-handed positive rotation about geographic north; longitude normalized to [-180,180)",
+  "derivation": [
+    "North pole is the +z axis. A positive angle theta rotates the equatorial x/y vector; longitude increases by theta and latitude is unchanged.",
+    "Model A: theta101(t)=theta102(t)=0. Model B for 0<=t<=100: theta101(t)=0.9*t degrees; theta102(t)=0.3*t degrees.",
+    "Relative to anchor a, subtract theta_a: theta_relative=theta_moving-theta_anchor, theta0=0. At t=50, moving101/anchor102 is 45-15=30 degrees.",
+    "At t=100, moving101/anchor102 is 90-30=60 degrees. Starting (20,30) gives (80,30). Starting (170,-20) anchored0 gives wrap(260)=-100 degrees longitude."
+  ],
+  "toleranceDegrees": 1e-08,
+  "cases": [
+    {
+      "id": "a-identity",
+      "model": "model-a.rot",
+      "timeMa": 100,
+      "plateId": 101,
+      "anchorPlateId": 0,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        20,
+        30
+      ]
+    },
+    {
+      "id": "b-present",
+      "model": "model-b.rot",
+      "timeMa": 0,
+      "plateId": 101,
+      "anchorPlateId": 0,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        20,
+        30
+      ]
+    },
+    {
+      "id": "b-midpoint",
+      "model": "model-b.rot",
+      "timeMa": 50,
+      "plateId": 101,
+      "anchorPlateId": 0,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        65,
+        30
+      ]
+    },
+    {
+      "id": "b-endpoint",
+      "model": "model-b.rot",
+      "timeMa": 100,
+      "plateId": 101,
+      "anchorPlateId": 0,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        110,
+        30
+      ]
+    },
+    {
+      "id": "b-seam",
+      "model": "model-b.rot",
+      "timeMa": 100,
+      "plateId": 101,
+      "anchorPlateId": 0,
+      "sourceLonLat": [
+        170,
+        -20
+      ],
+      "expectedLonLat": [
+        -100,
+        -20
+      ]
+    },
+    {
+      "id": "b-nonzero-anchor-mid",
+      "model": "model-b.rot",
+      "timeMa": 50,
+      "plateId": 101,
+      "anchorPlateId": 102,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        50,
+        30
+      ]
+    },
+    {
+      "id": "b-nonzero-anchor-end",
+      "model": "model-b.rot",
+      "timeMa": 100,
+      "plateId": 101,
+      "anchorPlateId": 102,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        80,
+        30
+      ]
+    },
+    {
+      "id": "b-anchor-self",
+      "model": "model-b.rot",
+      "timeMa": 100,
+      "plateId": 101,
+      "anchorPlateId": 101,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        20,
+        30
+      ]
+    },
+    {
+      "id": "b-reverse-anchor",
+      "model": "model-b.rot",
+      "timeMa": 100,
+      "plateId": 0,
+      "anchorPlateId": 101,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        -70,
+        30
+      ]
+    },
+    {
+      "id": "a-nonzero-anchor",
+      "model": "model-a.rot",
+      "timeMa": 100,
+      "plateId": 101,
+      "anchorPlateId": 102,
+      "sourceLonLat": [
+        20,
+        30
+      ],
+      "expectedLonLat": [
+        20,
+        30
+      ]
+    }
+  ]
+}

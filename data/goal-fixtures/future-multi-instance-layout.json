@@ -1,0 +1,62 @@
+{
+  "fixtureFormat": "acceptance-layout-only",
+  "loadableProject": false,
+  "status": "P2 schema not yet defined",
+  "requiredLayers": [
+    {
+      "kind": "Point",
+      "instanceIds": [
+        "Point-a",
+        "Point-b"
+      ],
+      "sharedFeatureId": "origin"
+    },
+    {
+      "kind": "Line",
+      "instanceIds": [
+        "Line-a",
+        "Line-b"
+      ],
+      "sharedFeatureId": "origin"
+    },
+    {
+      "kind": "Polygon",
+      "instanceIds": [
+        "Polygon-a",
+        "Polygon-b"
+      ],
+      "sharedFeatureId": "origin"
+    },
+    {
+      "kind": "Raster",
+      "instanceIds": [
+        "Raster-a",
+        "Raster-b"
+      ],
+      "sharedFeatureId": null
+    },
+    {
+      "kind": "Atlas",
+      "instanceIds": [
+        "Atlas-a",
+        "Atlas-b"
+      ],
+      "sharedFeatureId": null
+    },
+    {
+      "kind": "PlateModel",
+      "instanceIds": [
+        "PlateModel-a",
+        "PlateModel-b"
+      ],
+      "sharedFeatureId": null
+    }
+  ],
+  "expectations": [
+    "Different visibility, opacity, order and time binding per instance",
+    "Same featureId in distinct instances must not collide",
+    "Two PlateModel instances bind model-a.rot and model-b.rot; alternate anchor0/102",
+    "Save/reload retains all instance/viewport bindings and unknown fields"
+  ],
+  "currentKnownGap": "Current ProjectSession v2 has four fixed runtime layers; this file is a design assertion, not a current serializable project."
+}
