@@ -2,21 +2,44 @@
 
 `window.timeMachineAgent` is an in-page action facade. Automated callers drive
 the same handlers the UI drives; there is no synthetic `element.click()`. The
-facade adds no HTTP endpoint of its own: it is a frozen object with exactly
-`version`, `execute`, `getState` and `listActions`. When an action does talk to
+facade adds no HTTP endpoint of its own: it is a frozen object with
+`version`, `execute`, `getState`, `listActions` and the explicit `v2` extension. When an action does talk to
 the Server, it goes through the same clients the UI uses and is bound by the
 current session's permissions, so the facade is a convenience for driving the
 app, not a second authentication path or a security boundary.
 
 ```js
 const agent = window.timeMachineAgent;
-const state = agent.getState();          // safe snapshot, never contains credentials
+const state = agent.getState();          // redacted diagnostic snapshot
 const actions = agent.listActions();     // honest inventory of this build
 const result = await agent.execute("layer.setVisibility", {
   layerId: 3,
   active: false,
 });
 ```
+
+## In-app console
+
+Open **Console** above the timeline. Enter one command and press Enter or Run:
+
+```text
+catalog time.set
+time.set {"ageMa":110}
+jobs wait <jobId>
+query project.snapshot
+project.saveLocal
+logs {"traceId":"<traceId>","limit":20}
+```
+
+Use the actual jobId and traceId returned by the action. Job acceptance and
+terminal completion appear separately. `jobs get` and `jobs cancel` use the
+same job registry as the API. `help` lists the supported console syntax.
+Closing the panel retains this session's sanitized results; Clear output
+removes them. Refreshing starts a fresh console session. Select output selects
+the transcript for copying.
+
+The console calls `window.timeMachineAgent.v2` directly and preserves API
+availability and errors. Its input accepts action IDs and JSON objects.
 
 ## Contract
 
@@ -39,17 +62,18 @@ Every call resolves to exactly one of:
 
 Rules the handlers follow:
 
-- **Async actions wait for the real work.** An action either resolves after the
-  work finished, or answers `reloadRequired: true` with `accepted: true` and a
-  state the caller can re-check. `bootId` in `getState()` changes on every page
-  load, so a caller waits for the new `bootId` instead of assuming a navigation
-  happened.
-- **Nothing sensitive is returned.** Results, state sections and error messages
+- **Legacy completion is action-specific.** v1 preserves its existing return
+  shape. A handler return is not a general proof of GPU/imagery frame completion.
+  The v2 catalog identifies `state-committed`, `frame-committed`, `page-reload`
+  and `unverified` contracts; the latter two are not executable through v2 yet.
+  A v1 `reloadRequired` result requires observing the next page and its new
+  `bootId`; a promise on the departing page cannot observe that new document.
+- **Diagnostic output is redacted.** Results, state sections and error messages
   pass through a redactor that drops sensitive keys, strips `token=` /
   `Authorization:` / password literals from plain string values (so a network
   error stored in `catalog.error` cannot leak a credential), truncates structure
   deeper than four levels and breaks cycles. The facade itself is a frozen
-  object with exactly `version`, `execute`, `getState` and `listActions`; the
+  object with the four v1 members and a frozen `v2` extension; the
   registry and its internal maps are not reachable from the page.
 - **Enums are validated.** An unknown `tab`, `mode`, `source`, `module` or
   `step` is a `validation` failure, never a silent default.
@@ -62,20 +86,217 @@ Rules the handlers follow:
   handler stays registered while the capability is missing and becomes usable
   the moment the Server's capability handshake reports V2 support.
 
+## Implemented v2 diagnostics and state APIs
+
+This is the current P1 slice, not the complete migration API. There are 53
+legacy command declarations, three snapshot queries and three event types.
+The catalog also describes nine existing direct helpers: catalog.list/describe,
+jobs.get/wait/cancel, logs.query/export/clear and events.subscribe. The complete
+backend/future catalog and remaining command output schemas still need completion.
+
+For a descriptor with `invocation.channel === "direct"`, call the indicated
+facade method using `invocation.arguments` order. Do not send that ID to
+`execute` or `query`; both reject this misuse without performing the helper's
+effect. `invocation.returns` distinguishes JSON, optional results, native Blob,
+void and unsubscribe function. Describing a helper does not execute it.
+
+```js
+const api = window.timeMachineAgent.v2;
+const contract = await api.catalog.describe("logs.export");
+const blob = api.logs.export({ level: "error" }); // synchronous native Blob
+const jsonl = await blob.text();                 // no upload or automatic download
+```
+
+```js
+const api = window.timeMachineAgent.v2;
+const commands = api.catalog.list({ kind: "command" });
+const contract = await api.catalog.describe("layer.setOpacity");
+const off = api.events.subscribe({ types: ["state.changed"] }, async (event) => {
+  const snapshot = await api.query("scene.snapshot");
+  // Compare bootId and revision. Notifications can be coalesced; use the
+  // snapshot as authoritative state, not an assumed one-event/one-command count.
+  if (event.type === "state.changed") console.log(event.sections, snapshot);
+});
+const result = await api.execute("ui.layerStyle.open", { layerId: 4 });
+const ui = await api.query("ui.snapshot");
+const project = await api.query("project.snapshot");
+const logs = api.logs.query({ traceId: result.traceId, limit: 100 });
+const diagnosticBlob = api.logs.export(); // application/x-ndjson
+off(); // stop observing when the debug consumer is finished
+```
+
+- `execute` and `query` return `{ok, status, traceId, ...}`. Successful calls
+  contain `revision` and optional `data`; failures contain a safe `error`.
+  Snapshots also include `bootId` and `revision` in `data`. v1 stays unchanged.
+- `scene.snapshot` reads the registered providers. `ui.snapshot` and
+  `project.snapshot` read their sections directly. A missing provider returns
+  unsupported; a failed provider is isolated and reported honestly. Returned
+  state is copied, JSON-only and depth-limited. In particular, nested project
+  point-filter details can currently be truncated: this diagnostic query is
+  **not a lossless project export or persistence format**.
+- `state.changed` contains `{type, bootId, sequence, revision, sections, droppedCount}`.
+  Revision advances on actual changes in safe provider state. Notifications
+  coalesce within an event-loop turn and include removed provider sections;
+  there is no replay history. Up to 128 live subscriptions are allowed.
+  `sections` and `types` filters are optional. Subscriber exceptions, rejected
+  promises and mutations of event copies do not affect other consumers.
+- Existing UI mutations, timeline controls, layer publication and Cesium
+  camera changed/moveEnd events notify these same providers. Snapshot reads
+  also refresh revision for legacy mutations. Page disposal removes providers
+  and observers. The `atlas` section exposes status, requested age, target frame
+  and last committed frame using only source ID, age and label; it does not
+  include tile URLs or manifest contents. During failure the target and retained
+  committed frame can differ. This does not claim all layers committed together.
+- `job.changed` reports actual job acceptance (`phase: "accepted", status:
+  "running"`) and the owner's terminal result. A wait timeout or cancellation
+  request is not a terminal event. `frame.committed` is emitted only after an
+  operation that started with a `frame-committed` contract actually succeeds;
+  it is not emitted for every Cesium render or an unverified time setter.
+  Both include traceId/actionId; job events require jobId, while a v1/UI frame
+  completion can omit it. No params, result bodies or error text are copied.
+- Event notifications are advisory: up to 256 operation events are queued,
+  dropping oldest on overflow; `droppedCount` is cumulative. State notifications
+  remain coalesced (at most 64 sections). Requery snapshots and jobs after a
+  gap. `sections` filters match state events only; omit that filter to observe
+  job/frame events. Disposal closes the stream without a terminal-event promise.
+- `projection.select` and `camera.reset` expose asynchronous jobs, bounded waits
+  and actual cancellation. Other inline commands refuse accepted / timeout options.
+  `time.set`, `points.load`,
+  `points.selectDataset` and `raster.select` currently retain
+  their v1 paths while their full v2 completion contract is being implemented.
+- Logs record one trace per v1 or v2 execution, including overlapping calls.
+  They do not copy action params, return bodies or input-bearing error text.
+  An unverified v1 return logs `action.returned` / `unknown`; reload acceptance
+  logs `action.accepted`; an unknown v2 outcome logs `action.unknown`.
+  `action.completed` uses the action's declared completion boundary, which
+  does not imply a frame commit for a `state-committed` action.
+- Logs retain at most 2,000 entries / 2 MiB of encoded JSONL; each entry is
+  bounded. Query defaults to 100 and caps at 200 records; use
+  `nextAfterSequence` for paging. Export includes a diagnostic summary and
+  counters. `logs.clear()` clears this page's buffer. No automatic remote sink
+  is enabled. Ordinary RPC and shared-plate ByteStream reads have local request
+  diagnostics, including catalog-refresh trace propagation. Global errors,
+  remaining business/Worker/render correlation and low-frequency service
+  telemetry are still pending P1 work; real services have not been accepted.
+
+### Projection jobs
+
+```js
+const api = window.timeMachineAgent.v2;
+// Inspect scene.snapshot.projection.availableModes first. Current flat modes
+// still have the existing plate-only capability boundary.
+const started = await api.execute("projection.select", { projectionId: "rectangle" }, {
+  completion: "accepted",
+});
+if (started.ok && started.status === "accepted") {
+  const current = api.jobs.get(started.jobId);
+  const result = await api.jobs.wait(started.jobId, { timeoutMs: 15000 });
+  // timeout means this wait ended. The same job can still complete later.
+  // await api.jobs.cancel(started.jobId);  // requests real cancellation
+  // await api.jobs.wait(started.jobId);    // observes acknowledged cleanup
+}
+```
+
+Default asynchronous `execute` and `jobs.wait` wait at most 30,000 ms for the
+same job's terminal result. A finite positive `timeoutMs` (at most 2,147,483,647)
+overrides this waiting limit and preserves `jobId`; it does not cancel or
+resubmit work. Operation-specific failure deadlines and RPC deadlines are
+separate from the caller's wait.
+`jobs.get` returns a copied snapshot or `undefined` for an unknown, expired or
+previous-document id. `jobs.wait` checks the stored result before subscribing,
+so late callers cannot miss completion. `jobs.cancel` returns accepted while
+cleanup is pending; `cancelled` is reported only when the business owner has
+prevented late commits and completed required recovery rendering. A newer
+selection may produce `superseded`. Recovery render failure remains a failure,
+even if cancellation was requested. Repeating cancel on a terminal job returns
+that same terminal result.
+
+The per-document table allows 8 running jobs, 128 retained records and 128
+waiters. Completed records expire lazily after 5 minutes and are evicted oldest
+first when capacity is needed. Each retained result is capped at 64 KiB JSON;
+an oversized successful body is omitted with `dataTruncated: true`. No raw input
+or resource data is retained in snapshots. Closing the document releases local
+waiters; these ids are not recoverable server jobs. A wait timeout returns
+`status: "unknown", error.kind: "timeout"`; it never changes `job.status`.
+
+Logs include `job.accepted` and one actual terminal event, linked by traceId /
+jobId. Wait timeouts do not create false `action.failed` records. Jobs currently
+use their explicit namespace; unified job-method catalog descriptors remain
+follow-up work. Job/frame event descriptors are discoverable now. The full
+time/Atlas/point completion paths are not made ready simply by adding this table.
+
+`camera.reset` waits for native flight completion (or a synchronous flat home
+change) and a subsequent matching rendered camera state. Superseded/aborted
+owners cannot complete a later reset. Its own 30-second render deadline fails
+the operation; a public wait timeout alone does not. The Home button uses the
+same handler. Globe programmatic pan/zoom is still pending P3.
+
+The logger redacts recognized credential patterns and only accepts whitelisted
+detail fields. It cannot identify every secret embedded in arbitrary unlabelled
+text, so producers must continue to avoid collecting bodies and credentials.
+
+## Flat camera actions and read-only geometry
+
+```js
+await agent.execute("camera.zoom", { factor: 2 }); // width × 2: zoom out
+await agent.execute("camera.pan", { deltaX: 80, deltaY: -30 }); // CSS pixel drag
+const camera = agent.getState().projection.camera;
+```
+
+Both flat projections support these actions; Globe returns `501` without touching
+its saved camera. `factor` is finite within `[0.01, 100]`; deltas are finite within
+`[-100000, 100000]` CSS pixels each (`400` otherwise). Positive X moves map content
+right, positive Y down. Zoom returns `{ mode, width, factor }`, where width is the
+actual view width in metres and factor is the actual ratio after all camera
+clamps. Pan returns `{ mode, width, deltaX, deltaY }`. Mollweide wheel (including
+Ctrl-trackpad wheel) and pointer drag call these same business methods; Rectangle
+keeps its single native wheel/pointer controller; the API scales its public
+orthographic off-center frustum and uses Camera `moveRight`/`moveUp`. Mollweide
+pan preserves its frustum width because Cesium's SCENE3D move heuristic otherwise
+resizes it relative to the ECEF origin. No synthetic DOM input or extra wheel scaling.
+
+`projection.camera` reports the **actual logical camera mode**, even during a
+pending switch, plus `viewport: { width, height }` in CSS pixels. Flat snapshots
+also include view `width` in metres, `worldBounds: { left, top, right, bottom,
+width, height }` in canvas-relative CSS pixels and `worldRatio: { width, height }`
+relative to the viewport. Bounds project the entire domain (Mollweide's four
+ellipse extrema; Rectangle's four full-domain corners), not current plates.
+Scene-world `(depth, east, north)` points pass through the public `viewMatrix`
+(which includes the SCENE2D axis permutation), not the reference-frame-only
+`worldToCameraCoordinatesPoint` API.
+They can extend outside the canvas after zoom/pan. Home fits the whole domain
+with a maximum viewport ratio of 0.65. Reads are pure and contain no Viewer,
+WebGL objects or point arrays. These actions do not change age, projection
+selection or persisted project data. `camera.reset` retains the existing Home
+handler for all modes.
+
+Swap ownership: a superseding time request inherits a pending flat swap's
+rollback checkpoint; the renderer's original resource token stays unchanged.
+Successful confirmation retires those resources using that token. In particular,
+a Globe fast-path success settles the inherited swap before reporting its new
+age, so a later failed switch cannot restore an obsolete Mollweide frame.
+Genuine render failure still restores the checkpoint and restarts the stopped
+render loop.
+
 ## Projection MVP capability boundaries
 
 The `projection.select` action and the Projection select in `.view-options` are
 the operational Rectangle (Plate Carrée) MVP. What is and is not delivered:
 
-- **Delivered.** `globe` (the existing 3D scene) and `rectangle` (native
+- **Delivered in the existing plate-only runtime.** `globe` (the existing 3D scene), `rectangle` (native
   `SCENE2D` + `GeographicProjection(SPHERICAL_EARTH)`), on the same Viewer, with
-  the plate-model layer only. Switching, per-mode time changes, the plate-only
+  the plate-model layer only, and the existing custom Mollweide plate path. Switching, per-mode time changes, the plate-only
   capability gate, the layer guard, Home and the return-to-globe camera are all
   wired through one latest-request control shared by the UI and the facade.
-- **Not delivered.** Mollweide (`unsupported`), and the points / raster / atlas
-  layers inside `rectangle`. The GPU point shader and the imagery adapters are
+- **Not yet delivered.** Mercator, Robinson, and points / raster / atlas
+  layers inside the flat modes. The GPU point shader and the imagery adapters are
   still globe-only, so a visible points/raster/atlas layer blocks `rectangle`
   until it is explicitly turned off; it is never hidden automatically.
+- Point loading now shares one guard across the button, `points.load` and
+  `points.selectDataset({load:true})`. Both directions of a pending projection
+  transition are rejected, before changing the selected dataset or GPU state.
+  This preserves the current capability boundary; P3 still requires all six
+  layer types across all five views, so the guard is not P3 acceptance.
 - The projection is page-session state only. A reload always starts on `globe`,
   and the 2D camera is never written into the project's ECEF camera snapshot.
 - Control points, pole/seam handling, picking inside `rectangle`, tile loading
@@ -92,11 +313,12 @@ the operational Rectangle (Plate Carrée) MVP. What is and is not delivered:
 | `session` | AppShell | `accountName`, `signedIn`, `status`, `v2WorkspaceAvailable` |
 | `catalog` | AppShell | shared plate model `status`, `total`, `error`, scalar `models` |
 | `selection` | AppShell | the persisted resource selection |
-| `ui` | AppShell | `accountMenuOpen`, `activeSidebarTab`, `authDialogOpen`, `authMode`, `busy`, `toolbarCollapsed`, `uploadStep`, `uploadWizardOpen` |
+| `ui` | AppShell | sidebar/module/search/selected style layer, account/auth visibility, separate busy flags, toolbar, upload step/progress/error; no credential inputs |
 | `time` | main.ts | `ageMa`, `playing`, `speedMaPerSecond` |
 | `plateModel` | main.ts | `loadStatus`, `loadError`, `loadedSource`, `loadedModelId`, `loadedModelName`, `featureCount`, `polygonCount`, `rotationSequenceCount`, `unsupportedGeometryCount` |
 | `layers` | main.ts | scalar `groups` and `layers` (id, active, alpha, type, sourceRef) |
-| `points` | main.ts | `datasetId` (loaded dataset), `loaded`, `selectedDatasetId` |
+| `points` | main.ts | `datasetId` (loaded dataset), `loaded`, `selectedDatasetId`, `loading`, `status` |
+| `project` | main.ts | diagnostic schema/name/time/groups/layers/camera snapshot; depth-limited, not a lossless export |
 | `projection` | main.ts | `requestedId`, `committedId`, `status`, `revision`, `committedTimeMa`, `requestedTimeMa`, `committedTimeState`, `lastError`, `availableModes` |
 
 ## Runtime ids
@@ -137,6 +359,7 @@ the API can never write two different values.
 | layer search | `ui.layerSearch.set` |
 | ↥ Upload to Layer | `upload.open` |
 | ◉ Layer Style | `ui.layerStyle.open` |
+| × Close layer style | `ui.layerStyle.close` |
 | group collapse ‹/› | `layer.group.setCollapsed` |
 | group visibility | `layer.group.setVisibility` |
 | group opacity | `layer.group.setOpacity` |
@@ -501,6 +724,32 @@ Params:
 
 Select the single raster layer source by id.
 
+Point, Atlas, and Raster manifests load independently of the core plate view.
+`getState().startupResources.manifests` reports each manifest as `loading`,
+`ready`, or `error`; `ready` here means the catalog is available, not that its
+imagery has rendered. Read `atlas`/`raster` state for actual imagery completion.
+Point loading/selection and Raster selection remain unavailable until their
+manifest is usable; availability is reevaluated when queried or invoked.
+Manifest failures appear as `startup.<resource>-manifest-failed` asset logs.
+Requests have a 30-second deadline covering headers and body and are cancelled
+on non-persisted page exit. This does not claim complete page/GPU disposal.
+
+An explicitly marked `tiles.emptyTilePolicy: "transparent-204"` Raster source
+may treat its HTTP 204 tiles as transparent NoData. Unmarked sources retain
+native behavior. HTTP/decoding errors are still failures; this policy does not
+provide numerical pixel values or change the read-only sampling contract.
+
+The shared v1/UI path now waits for the selected provider's real render
+confirmation, or reports an explicit hidden selection. Its result preserves
+`data.rasterId` and adds `data.selection` with generation and ready/hidden
+details. A failed switch keeps the prior committed raster and returns failure.
+The v2 command remains `unverified` until its complete operation contract is
+integrated and accepted; this is not a promise of joint viewport completion.
+
+`getState().raster` (also within `v2.query("scene.snapshot")`) distinguishes
+`requestedRaster` and `committedRaster`, exposing only id/sourceId/label,
+status and a safe error. It contains no tile URL, source file or raw manifest.
+
 Params: 
 - `rasterId` (string) — Raster id from the single-raster manifest.
 
@@ -665,7 +914,10 @@ The behaviour above is covered by tests in `src/test`:
 
 | file | what it pins down |
 | --- | --- |
-| `agent-facade-security.test.ts` | redaction of state/results/errors (including a labelled credential inside a plain string), depth truncation, cycles, error kinds, array/object parameters, frozen four-method facade, `listActions` copies, live availability in both directions |
+| `agent-facade-security.test.ts` | redaction of state/results/errors (including a labelled credential inside a plain string), idempotence, depth truncation, cycles, error kinds, array/object parameters, frozen v1/v2 facade, `listActions` copies, live availability in both directions |
+| `agent-api-state-events.test.ts` | copied query results, revisions, coalescing, filters, observer isolation, provider replacement/disposal, JSON-only state |
+| `agent-api-logs.test.ts` / `diagnostics-logger.test.ts` | concurrent traces, honest completion outcomes, bounded retention/export, whitelisted detail fields, redaction and sink isolation |
+| `appshell-ui-parity.test.ts` | real SFC auth/upload/style guard parity, notifications and cleanup, filtering retains native runtime nodes/listeners/status |
 | `layer-controller.test.ts` | the shared setter: renderer, native controls, published state, persistence, group members, order with `groupIdByLayer`, alpha and id rejection |
 | `plate-source.test.ts` | explicit source resolution, `sourceRef` round-trip, one-source-only selection |
 | `cloud-client-session.test.ts` | pagination de-duplication and `incomplete`, sign-in rollback, stale-session clearing, V2 failure keeping the V1 token, cloud-project source restore, SHA-256 digest golden |
@@ -684,3 +936,32 @@ account (sign-in, cloud project open/save, ingest of a private dataset). Every
 automated test here uses synthetic values, an offline `fetch` stub and no
 credentials. Projection/reprojection of ingested point data is still pending
 and has no action behind it.
+
+### Failed instance retry (P2-04, current implementation)
+
+`layer.retry({ layerId })` retries an existing failed ordinary Point, Line,
+Polygon, Raster or Atlas instance. Default Atlas 1 and Raster 3 are included;
+the existing GPU Point 2 and PlateModel 4 use their own runtime paths and are
+not accepted here. Supported sources remain the three explicit synthetic
+vector fixtures and the existing local Raster/Atlas manifests. A missing
+manifest or unsupported source is an explicit error, never a fallback.
+
+The command is a cancellable `frame-committed` job. It preserves the project
+ID, group, source, visibility and style; releases owned failed resources;
+then waits for the replacement visible or legitimate hidden frame. Result:
+`{ layerId, sourceRef, frameConfirmed: true }`. It does not confirm cloud
+persistence. Retry is currently Globe-only and requires the actual scene
+mode as well as the committed projection to be Globe.
+
+A second retry or removal of the same instance returns `busy` until the
+first retry, including late cancellation cleanup, has settled. Another
+instance may proceed independently. `raster.select` for that instance and
+projection/time changes during retry cannot race its cleanup/replacement.
+Cancellation retains an explicit failed project record for further retry or
+removal. If cleanup itself fails, the result is `failed`, not a successful
+cancellation; the owner remains available for subsequent cleanup. The UI's
+`Retry <name> layer` button invokes this same command and preserves the
+existing default-layer DOM bindings.
+
+Verification status is tracked in the Goal ledger and P2-04 evidence; an
+API/job unit test is not evidence that a Cesium frame rendered.

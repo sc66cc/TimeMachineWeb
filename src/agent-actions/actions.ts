@@ -16,10 +16,21 @@ export const AGENT_ACTIONS = {
   accountMenuSetVisible: "ui.accountMenu.setVisible",
   accountMenuToggle: "ui.accountMenu.toggle",
   cameraReset: "camera.reset",
+  cameraZoom: "camera.zoom",
+  cameraPan: "camera.pan",
   catalogRefresh: "catalog.refresh",
   datasetSelect: "dataset.select",
   exportPlaceholder: "export.run",
+  featureSelect: "feature.select",
+  featureClear: "feature.clear",
+  layerAdd: "layer.add",
+  layerRemove: "layer.remove",
+  layerRetry: "layer.retry",
+  layerSetStyle: "layer.setStyle",
   layerGroupCollapse: "layer.group.setCollapsed",
+  layerGroupAdd: "layer.group.add",
+  layerGroupMove: "layer.group.move",
+  layerGroupRemove: "layer.group.remove",
   layerGroupOpacity: "layer.group.setOpacity",
   layerGroupVisibility: "layer.group.setVisibility",
   layerMoveToGroup: "layer.setGroup",
@@ -27,6 +38,7 @@ export const AGENT_ACTIONS = {
   layerOrder: "layer.setOrder",
   layerSearchSet: "ui.layerSearch.set",
   layerStyleOpen: "ui.layerStyle.open",
+  layerStyleClose: "ui.layerStyle.close",
   layerVisibility: "layer.setVisibility",
   majorCitiesSetVisible: "ui.majorCities.setVisible",
   moduleSelect: "ui.module.select",
@@ -40,6 +52,8 @@ export const AGENT_ACTIONS = {
   projectOpen: "project.open",
   projectionSelect: "projection.select",
   projectSave: "project.save",
+  projectSaveLocal: "project.saveLocal",
+  projectExportOriginal: "project.exportOriginal",
   projectSetName: "project.setName",
   publishPlaceholder: "publish.run",
   rasterSelect: "raster.select",
@@ -71,11 +85,22 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
   [AGENT_ACTIONS.authLogout]: "Sign out",
   [AGENT_ACTIONS.authModeSet]: "Switch the sign-in method",
   [AGENT_ACTIONS.authSendCode]: "Send an email verification code",
-  [AGENT_ACTIONS.cameraReset]: "Reset the globe to the home view",
+  [AGENT_ACTIONS.cameraReset]: "Reset the current projection to the home view",
+  [AGENT_ACTIONS.cameraZoom]: "Zoom the flat map",
+  [AGENT_ACTIONS.cameraPan]: "Pan the flat map",
   [AGENT_ACTIONS.catalogRefresh]: "Refresh the plate model catalog",
   [AGENT_ACTIONS.datasetSelect]: "Select a versioned point dataset",
   [AGENT_ACTIONS.exportPlaceholder]: "Export the project",
+  [AGENT_ACTIONS.featureSelect]: "Select a feature",
+  [AGENT_ACTIONS.featureClear]: "Clear feature selection",
+  [AGENT_ACTIONS.layerAdd]: "Add an independent layer instance",
+  [AGENT_ACTIONS.layerRemove]: "Remove a layer instance",
+  [AGENT_ACTIONS.layerRetry]: "Retry a failed layer instance",
+  [AGENT_ACTIONS.layerSetStyle]: "Set ordinary point, line or polygon style",
   [AGENT_ACTIONS.layerGroupCollapse]: "Collapse or expand a layer group",
+  [AGENT_ACTIONS.layerGroupAdd]: "Add a layer group",
+  [AGENT_ACTIONS.layerGroupMove]: "Move a layer group",
+  [AGENT_ACTIONS.layerGroupRemove]: "Remove an empty layer group",
   [AGENT_ACTIONS.layerGroupOpacity]: "Set a layer group opacity",
   [AGENT_ACTIONS.layerGroupVisibility]: "Show or hide a layer group",
   [AGENT_ACTIONS.layerMoveToGroup]: "Move a layer into another group",
@@ -83,6 +108,7 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
   [AGENT_ACTIONS.layerOrder]: "Reorder layers",
   [AGENT_ACTIONS.layerSearchSet]: "Filter the layer list",
   [AGENT_ACTIONS.layerStyleOpen]: "Open a layer's style panel",
+  [AGENT_ACTIONS.layerStyleClose]: "Close the layer style panel",
   [AGENT_ACTIONS.layerVisibility]: "Show or hide a layer",
   [AGENT_ACTIONS.majorCitiesSetVisible]: "Show or hide major cities",
   [AGENT_ACTIONS.moduleSelect]: "Select a workspace module",
@@ -96,6 +122,8 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
   [AGENT_ACTIONS.projectOpen]: "Open a cloud project revision",
   [AGENT_ACTIONS.projectionSelect]: "Switch the map projection",
   [AGENT_ACTIONS.projectSave]: "Save the project to the cloud",
+  [AGENT_ACTIONS.projectSaveLocal]: "Save the local project draft",
+  [AGENT_ACTIONS.projectExportOriginal]: "Download the original project input",
   [AGENT_ACTIONS.projectSetName]: "Rename the project",
   [AGENT_ACTIONS.publishPlaceholder]: "Publish the project",
   [AGENT_ACTIONS.rasterSelect]: "Select the single raster layer source",
@@ -116,6 +144,7 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
 };
 
 import { agentActions } from "./registry";
+import { actionContractMetadata } from "./action-contracts";
 import type { AgentActionDefinition, AgentActionParam } from "./types";
 
 interface Declaration {
@@ -163,6 +192,8 @@ const OBJ = (
  * unsupported rather than silently missing.
  */
 const DECLARATIONS: readonly Declaration[] = [
+  { description: "Select an existing visible feature through the shared UI selection owner.", id: AGENT_ACTIONS.featureSelect, params: [OBJ("key", "Complete viewportId/layerId/featureId identity.")] },
+  { description: "Clear the target viewport selection and inspector.", id: AGENT_ACTIONS.featureClear, params: [STR("viewportId", "Existing viewport identifier.")] },
   {
     description: "Sign in with a Unity account/password or an email verification code.",
     id: AGENT_ACTIONS.authLogin,
@@ -208,6 +239,16 @@ const DECLARATIONS: readonly Declaration[] = [
     params: [],
   },
   {
+    description: "Capture the current project configuration and save the local draft. Returns the revision and timestamp after storage accepts the write.",
+    id: AGENT_ACTIONS.projectSaveLocal,
+    params: [],
+  },
+  {
+    description: "Start a local download of the exact original project input for compatibility review or recovery. Reports download initiation and byte length.",
+    id: AGENT_ACTIONS.projectExportOriginal,
+    params: [STR("source", "current (default) or review for a cloud document awaiting compatibility review.", false)],
+  },
+  {
     description:
       "Open a cloud project revision. Requires the TimeMachine V2 workspace endpoints.",
     id: AGENT_ACTIONS.projectOpen,
@@ -215,7 +256,7 @@ const DECLARATIONS: readonly Declaration[] = [
   },
   {
     description:
-      "Switch the map projection. Shares the UI select's handler. 'globe' keeps the 3D scene; 'rectangle' is the native 2D Plate Carree view and needs every points/raster/atlas layer turned off; 'mollweide' is not implemented and answers unsupported.",
+      "Switch the map projection. Shares the UI select's handler. 'globe' keeps the 3D scene; 'rectangle' is the native 2D Plate Carree view and needs every points/raster/atlas layer turned off; 'mollweide' is a plate-only flat plane with the same incompatible-layer guard.",
     id: AGENT_ACTIONS.projectionSelect,
     params: [STR("projectionId", "'globe', 'rectangle' or 'mollweide'.")],
   },
@@ -235,7 +276,17 @@ const DECLARATIONS: readonly Declaration[] = [
     params: [NUM("speedMaPerSecond", "Speed in Ma per second.")],
   },
   {
-    description: "Reset the globe to the home view.",
+    description: "Multiply flat view width (factor > 1 zooms out). Clamped result is reported; Globe returns 501.",
+    id: AGENT_ACTIONS.cameraZoom,
+    params: [NUM("factor", "Finite multiplier within [0.01, 100].")],
+  },
+  {
+    description: "Drag the flat map in CSS pixels; positive X moves content right, positive Y down. Globe returns 501.",
+    id: AGENT_ACTIONS.cameraPan,
+    params: [NUM("deltaX", "Horizontal CSS pixels within [-100000, 100000]."), NUM("deltaY", "Vertical CSS pixels within [-100000, 100000].")],
+  },
+  {
+    description: "Reset the current projection to the home view.",
     id: AGENT_ACTIONS.cameraReset,
     params: [],
   },
@@ -254,6 +305,13 @@ const DECLARATIONS: readonly Declaration[] = [
     id: AGENT_ACTIONS.layerGroupVisibility,
     params: [NUM("groupId", "Group id."), BOOL("active", "True to show.")],
   },
+  { description: "Add an independent Point, Line or Polygon from its selected synthetic fixture, or Raster/Atlas from the existing local manifest. Vector source coordinates only; service-backed vector sources and reconstruction are not implemented by this binding.", id: AGENT_ACTIONS.layerAdd, params: [OBJ("layer", "Layer name, type, sourceRef, groupId, active, alpha and optional Raster rasterId.")] },
+  { description: "Release a non-default Point, Line, Polygon, Raster or Atlas instance and confirm its removal frame before removing its project record. Default runtime layers cannot be removed by this operation.", id: AGENT_ACTIONS.layerRemove, params: [NUM("layerId", "Instance to remove.")] },
+  { description: "Retry a failed supported Point, Line, Polygon, Raster or Atlas instance, preserving its project identity and settings. Includes default Raster/Atlas; excludes the GPU point and plate model paths. Confirms owned cleanup and the replacement or hidden frame.", id: AGENT_ACTIONS.layerRetry, params: [NUM("layerId", "Failed instance to retry.")] },
+  { description: "Update an ordinary Point (singleColor/pointSize), Line (lineColor/lineWidth) or Polygon (fillColor/outlineColor/outlineWidth) instance. Fields cannot be mixed between types. GPU point expressions keep their existing points.setStyle action. This commits style state and requests rendering, without waiting for a frame.", id: AGENT_ACTIONS.layerSetStyle, params: [NUM("layerId", "Ordinary Point, Line or Polygon instance."), OBJ("style", "Nonempty patch with fields matching the layer type.")] },
+  { description: "Add a project layer group with an optional parent.", id: AGENT_ACTIONS.layerGroupAdd, params: [OBJ("group", "Group name, active, alpha, collapsed and optional parentId.")] },
+  { description: "Move a group into a parent, or omit parentId to move to the root.", id: AGENT_ACTIONS.layerGroupMove, params: [NUM("groupId", "Group to move."), NUM("parentId", "New parent group; omitted means root.", false)] },
+  { description: "Remove an empty group. Groups containing layers or child groups must first be emptied.", id: AGENT_ACTIONS.layerGroupRemove, params: [NUM("groupId", "Group to remove.")] },
   {
     description: "Set a layer group opacity between 0 and 1.",
     id: AGENT_ACTIONS.layerGroupOpacity,
@@ -327,6 +385,11 @@ const DECLARATIONS: readonly Declaration[] = [
     params: [NUM("layerId", "Layer id to select.", false)],
   },
   {
+    description: "Close the inline layer style panel.",
+    id: AGENT_ACTIONS.layerStyleClose,
+    params: [],
+  },
+  {
     description: "Show or hide the account menu in the top bar.",
     id: AGENT_ACTIONS.accountMenuSetVisible,
     params: [BOOL("visible", "True to show the menu.")],
@@ -372,9 +435,9 @@ const DECLARATIONS: readonly Declaration[] = [
     params: [OBJ("style", "Partial point style expression.")],
   },
   {
-    description: "Select the single raster layer source by id.",
+    description: "Select a raster instance's source by id. Omit layerId for the original raster layer.",
     id: AGENT_ACTIONS.rasterSelect,
-    params: [STR("rasterId", "Raster id from the single-raster manifest.")],
+    params: [STR("rasterId", "Raster id from the single-raster manifest."), NUM("layerId", "Raster layer instance; defaults to the original raster layer.", false)],
   },
   {
     description: "Go back one step in the upload wizard.",
@@ -464,6 +527,10 @@ export const AGENT_DECLARATIONS: Readonly<
 
 for (const definition of Object.values(AGENT_DECLARATIONS)) {
   agentActions.register(definition);
+  agentActions.setContract(definition.id, actionContractMetadata(definition.id), async () => {
+    const { actionContractDetails } = await import("./action-schemas");
+    return actionContractDetails(definition);
+  });
 }
 
 /**

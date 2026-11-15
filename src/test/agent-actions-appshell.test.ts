@@ -3,7 +3,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { SharedPlateModelClient, SharedPlateRpcError } from "../plate-model/shared-plate-client";
 
 import { mountAppShell } from "./support/mount-app-shell";
 import {
@@ -28,6 +29,8 @@ function payloadOf(result: AgentActionResult): Record<string, unknown> {
 
 /** Actions with no button of their own: the programmatic form of a gesture. */
 const GESTURE_ONLY_ACTIONS = new Set([
+  AGENT_ACTIONS.cameraZoom,
+  AGENT_ACTIONS.cameraPan,
   AGENT_ACTIONS.accountMenuSetVisible,
   AGENT_ACTIONS.authDialogOpen,
   AGENT_ACTIONS.layerMoveToGroup,
@@ -180,7 +183,8 @@ describe("mounted AppShell action facade", () => {
       const back = await agentActions.execute(AGENT_ACTIONS.uploadBack, {
         step: "map",
       });
-      expect(payloadOf(back)).toEqual({ step: "map" });
+      // Navigation cannot bypass the same missing ingest capability as open.
+      expect(back).toMatchObject({ ok: false, error: { kind: "unsupported" } });
 
       const closeUpload = await agentActions.execute(AGENT_ACTIONS.uploadClose);
       expect(closeUpload.ok).toBe(true);
@@ -202,10 +206,10 @@ describe("mounted AppShell action facade", () => {
     }
   });
 
-  it("redacts a credential carried by a real cloud error string", async () => {
+  it("does not expose credentials carried by a network exception", async () => {
     // The real path: the offline fetch fails with a message that contains a
-    // labelled credential, the real cloud client stores that message as
-    // `sharedPlateModelsError`, and the real `catalog` provider returns it.
+    // labelled credential. The transport now replaces arbitrary network error
+    // text with a safe classification before the real cloud state provider.
     const mounted = await mountAppShell({
       fetchErrorMessage:
         "Shared plate model request failed: token=fixture-secret",
@@ -217,12 +221,24 @@ describe("mounted AppShell action facade", () => {
       const catalog = agentActions.getState().catalog as {
         error: string;
       };
-      expect(catalog.error).toContain("token=[redacted]");
-      // Ordinary text in the same message survives.
-      expect(catalog.error).toContain("Shared plate model request failed");
+      expect(catalog.error).toContain("network-error");
     } finally {
       mounted.unmount();
     }
+  });
+
+  it("still redacts labelled credentials in a retained business error message", async () => {
+    const mounted = await mountAppShell();
+    const request = vi.spyOn(SharedPlateModelClient.prototype, "display").mockRejectedValue(
+      new SharedPlateRpcError(500, "Shared plate model request failed: token=fixture-secret", "/fixture/read"),
+    );
+    try {
+      expect((await agentActions.execute(AGENT_ACTIONS.catalogRefresh)).ok).toBe(false);
+      const catalog = agentActions.getState().catalog as { error: string };
+      expect(catalog.error).toContain("token=[redacted]");
+      expect(catalog.error).toContain("Shared plate model request failed");
+      expect(JSON.stringify(agentActions.getState())).not.toContain("fixture-secret");
+    } finally { request.mockRestore(); mounted.unmount(); }
   });
 
   it("reports a failed auth.sendCode as a failure, not a success", async () => {

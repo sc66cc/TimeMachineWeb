@@ -65,7 +65,6 @@ describe("V2 availability discovered after mount", () => {
     try {
       const v2Actions = [
         AGENT_ACTIONS.datasetSelect,
-        AGENT_ACTIONS.projectOpen,
         AGENT_ACTIONS.uploadOpen,
         AGENT_ACTIONS.uploadRun,
         AGENT_ACTIONS.uploadCancel,
@@ -76,6 +75,7 @@ describe("V2 availability discovered after mount", () => {
       for (const id of v2Actions) {
         expect(inventory.get(id), id).toBe("unsupported");
       }
+      expect(inventory.get(AGENT_ACTIONS.projectOpen)).toBe("unsupported");
 
       // The handshake resolves late, exactly like a slow Server.
       bootstrapGate.release();
@@ -87,13 +87,23 @@ describe("V2 availability discovered after mount", () => {
           .find((action) => action.id === id)?.status;
         expect(status, id).toBe("ready");
       }
+      // Opening also persists the replacement project. main owns that handler;
+      // the standalone shell keeps it unavailable after the Server handshake.
+      expect(agentActions.listActions().find(action => action.id === AGENT_ACTIONS.projectOpen)?.status).toBe("unsupported");
+      expect(await agentActions.execute(AGENT_ACTIONS.projectOpen, { revisionId: 1 }))
+        .toMatchObject({ ok: false, error: { kind: "unsupported" } });
 
       // The registered production handlers now answer instead of a 501: the
-      // upload wizard opens (signed out, so it asks for a session), cancelling
+      // upload entry now asks for authentication without claiming it opened,
+      // cancelling
       // an idle wizard succeeds, and an ingest without a file is a validation
       // failure rather than "unsupported".
       const opened = await agentActions.execute(AGENT_ACTIONS.uploadOpen);
-      expect(opened.ok).toBe(true);
+      expect(opened).toMatchObject({ ok: false, error: { kind: "auth" } });
+      expect(agentActions.getState().ui).toMatchObject({
+        authDialogOpen: true,
+        uploadWizardOpen: false,
+      });
 
       const cancelled = await agentActions.execute(AGENT_ACTIONS.uploadCancel);
       expect(cancelled.ok).toBe(true);

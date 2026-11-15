@@ -72,6 +72,13 @@ describe("redactSensitive", () => {
 });
 
 describe("redactErrorMessage", () => {
+  it("keeps redaction stable across v1, v2 and state boundaries", () => {
+    const message = `request failed token=${SYNTHETIC_SECRET}; password="${SYNTHETIC_SECRET}"`;
+    const once = redactErrorMessage(message);
+    expect(redactErrorMessage(once)).toBe(once);
+    expect(redactSensitive({ error: once })).toEqual({ error: once });
+  });
+
   it("removes labelled credentials from a free-form message", () => {
     expect(redactErrorMessage(`failed: token=${SYNTHETIC_SECRET}`)).toBe(
       "failed: token=[redacted]",
@@ -324,22 +331,23 @@ describe("agentActions.listActions", () => {
 });
 
 describe("installAgentActions", () => {
-  it("publishes exactly the four facade methods and nothing else", () => {
+  it("publishes the v1 surface and the explicit v2 extension without registry access", () => {
     const target = {} as Window & Record<string, unknown>;
     installAgentActions(target);
-    const facade = target.timeMachineAgent as Record<string, unknown>;
+    const facade = target.timeMachineAgent!;
     expect(Object.keys(facade).sort()).toEqual([
       "execute",
       "getState",
       "listActions",
+      "v2",
       "version",
     ]);
     expect(Object.isFrozen(facade)).toBe(true);
-    expect(facade.register).toBeUndefined();
-    expect(facade.registerStateSection).toBeUndefined();
-    expect(facade.definitions).toBeUndefined();
-    expect(facade.handlers).toBeUndefined();
-    expect(facade.sections).toBeUndefined();
+    expect(facade).not.toHaveProperty("register");
+    expect(facade).not.toHaveProperty("registerStateSection");
+    expect(facade).not.toHaveProperty("definitions");
+    expect(facade).not.toHaveProperty("handlers");
+    expect(facade).not.toHaveProperty("sections");
     // The published property is not writable, so a caller cannot swap it.
     expect(() => {
       target.timeMachineAgent = { version: "spoof" } as never;

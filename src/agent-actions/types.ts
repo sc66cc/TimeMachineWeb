@@ -18,6 +18,9 @@
  *    wait for the new document before reading state again.
  */
 
+import type { FrontendApiV2 } from "./contracts";
+import type { OperationContext } from "./operation";
+
 export const AGENT_FACADE_VERSION = "1.0.0";
 
 export type AgentActionStatus = "ready" | "unsupported";
@@ -89,6 +92,7 @@ export interface AgentActionOutcome {
 
 export type AgentActionHandler = (
   params: Record<string, unknown>,
+  context?: OperationContext,
 ) => Promise<AgentActionOutcome> | AgentActionOutcome;
 
 export interface AgentStateSnapshot {
@@ -100,6 +104,7 @@ export interface AgentStateSnapshot {
 export interface TimeMachineAgentFacade {
   /** Facade contract version, not the app version. */
   version: string;
+  readonly v2: FrontendApiV2;
   execute(
     actionId: string,
     params?: Record<string, unknown>,
@@ -174,7 +179,7 @@ export function redactSensitive(
  * `token=abc`, `Authorization: Bearer abc`, `password: "abc"`.
  */
 const SENSITIVE_LABELLED_VALUE =
-  /\b(authorization|proxy-authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|password|passwd|pwd|secret|token|digest)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|(?:bearer|basic|token)\s+[^\s,;)}\]]+|[^\s,;)}\]]+)/gi;
+  /\b(authorization|proxy-authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|password|passwd|pwd|secret|token|digest)\b(\s*[:=]\s*)(\[redacted\]|"[^"]*"|'[^']*'|(?:bearer|basic|token)\s+[^\s,;)}\]]+|[^\s,;)}\]]+)/gi;
 
 /**
  * Removes credentials from a free-form error string: labelled `key=value`

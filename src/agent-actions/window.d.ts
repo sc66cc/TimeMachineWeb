@@ -1,4 +1,4 @@
-import type { TimeMachineAgentFacade } from "./agent-actions";
+import type { TimeMachineAgentFacade } from "./types";
 
 declare global {
   interface Window {
