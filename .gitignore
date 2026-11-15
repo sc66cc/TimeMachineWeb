@@ -33,3 +33,11 @@ data/generated/
 data/TimeSequenceAtlas/
 data/SingleRaster/
 data/PointData/
+
+# Local AI tooling & agent state (not project source)
+.agents/
+.artifacts/
+.grok/
+.hermes/
+docs/superpowers/
+skills-lock.json
