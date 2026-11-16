@@ -389,56 +389,56 @@ export class PlateRenderer {
     };
     const renderer = new PlateRenderer(viewer, stats, options.layerId);
     try {
-    if (options.graticule !== false) {
-      renderer.graticule = renderer.ownPrimitive(new PolylineCollection());
-      populateGraticule(renderer.graticule);
-      viewer.scene.primitives.add(renderer.graticule);
-    }
-    const featuresByPlate = new Map<number, PlateFeature[]>();
-
-    for (const feature of features) {
-      checkCreateSignal(options.signal);
-      if (feature.polygons.length === 0) {
-        continue;
+      if (options.graticule !== false) {
+        renderer.graticule = renderer.ownPrimitive(new PolylineCollection());
+        populateGraticule(renderer.graticule);
+        viewer.scene.primitives.add(renderer.graticule);
       }
-      const plateFeatures = featuresByPlate.get(feature.plateId) ?? [];
-      plateFeatures.push(feature);
-      featuresByPlate.set(feature.plateId, plateFeatures);
-    }
+      const featuresByPlate = new Map<number, PlateFeature[]>();
 
-    const plateGroups = [...featuresByPlate.entries()];
-    for (const [plateIndex, [plateId, plateFeatures]] of plateGroups.entries()) {
-      checkCreateSignal(options.signal);
-      const instances: GeometryInstance[] = [];
-      const renderedInstances: RenderedInstance[] = [];
-      const outlines = renderer.ownPrimitive(new PolylineCollection());
-      const renderedOutlines: RenderedOutline[] = [];
+      for (const feature of features) {
+        checkCreateSignal(options.signal);
+        if (feature.polygons.length === 0) {
+          continue;
+        }
+        const plateFeatures = featuresByPlate.get(feature.plateId) ?? [];
+        plateFeatures.push(feature);
+        featuresByPlate.set(feature.plateId, plateFeatures);
+      }
 
-      for (const feature of plateFeatures) {
-        let featureWasRendered = false;
-        for (const [polygonIndex, polygon] of feature.polygons.entries()) {
-          checkCreateSignal(options.signal);
-          let triangulated: ReturnType<typeof triangulatePlatePolygon>;
-          try {
-            triangulated = triangulatePlatePolygon(polygon);
-            // Keep the CPU-side source mesh before Cesium takes ownership of
-            // the geometry, so a future projection runtime can rebuild it.
-            renderer.retainedMeshes.push(
-              capturePlatePolygonMesh(
-                feature,
-                polygonIndex,
-                triangulated.geometry,
-              ),
-            );
-          } catch (error) {
-            stats.skippedPolygonCount += 1;
-            stats.warnings.push(
-              `${feature.id} polygon ${polygonIndex}: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-            continue;
-          }
+      const plateGroups = [...featuresByPlate.entries()];
+      for (const [plateIndex, [plateId, plateFeatures]] of plateGroups.entries()) {
+        checkCreateSignal(options.signal);
+        const instances: GeometryInstance[] = [];
+        const renderedInstances: RenderedInstance[] = [];
+        const outlines = renderer.ownPrimitive(new PolylineCollection());
+        const renderedOutlines: RenderedOutline[] = [];
+
+        for (const feature of plateFeatures) {
+          let featureWasRendered = false;
+          for (const [polygonIndex, polygon] of feature.polygons.entries()) {
+            checkCreateSignal(options.signal);
+            let triangulated: ReturnType<typeof triangulatePlatePolygon>;
+            try {
+              triangulated = triangulatePlatePolygon(polygon);
+              // Keep the CPU-side source mesh before Cesium takes ownership of
+              // the geometry, so a future projection runtime can rebuild it.
+              renderer.retainedMeshes.push(
+                capturePlatePolygonMesh(
+                  feature,
+                  polygonIndex,
+                  triangulated.geometry,
+                ),
+              );
+            } catch (error) {
+              stats.skippedPolygonCount += 1;
+              stats.warnings.push(
+                `${feature.id} polygon ${polygonIndex}: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+              continue;
+            }
             const id = renderer.createPickId(feature, polygonIndex);
             const initiallyVisible = isFeatureValidAtTime(feature, 0);
             instances.push(
@@ -482,50 +482,50 @@ export class PlateRenderer {
             stats.polygonCount += 1;
             stats.triangleCount += triangulated.triangleCount;
             stats.vertexCount += triangulated.vertexCount;
+          }
+          if (featureWasRendered) {
+            stats.renderedFeatureCount += 1;
+          }
         }
-        if (featureWasRendered) {
-          stats.renderedFeatureCount += 1;
+
+        if (instances.length > 0) {
+          const fill = renderer.ownPrimitive(new Primitive({
+            geometryInstances: instances,
+            appearance: new PerInstanceColorAppearance({
+              flat: true,
+              translucent: true,
+              closed: false,
+              faceForward: true,
+            }),
+            asynchronous: false,
+            releaseGeometryInstances: true,
+          }));
+          viewer.scene.primitives.add(fill);
+          viewer.scene.primitives.add(outlines);
+
+          renderer.bundles.set(plateId, {
+            plateId,
+            fill,
+            outlines,
+            instances: renderedInstances,
+            renderedOutlines,
+          });
+        } else {
+          renderer.releaseOwnedPrimitive(outlines);
         }
-      }
 
-      if (instances.length > 0) {
-        const fill = renderer.ownPrimitive(new Primitive({
-          geometryInstances: instances,
-          appearance: new PerInstanceColorAppearance({
-            flat: true,
-            translucent: true,
-            closed: false,
-            faceForward: true,
-          }),
-          asynchronous: false,
-          releaseGeometryInstances: true,
-        }));
-        viewer.scene.primitives.add(fill);
-        viewer.scene.primitives.add(outlines);
-
-        renderer.bundles.set(plateId, {
-          plateId,
-          fill,
-          outlines,
-          instances: renderedInstances,
-          renderedOutlines,
-        });
-      } else {
-        renderer.releaseOwnedPrimitive(outlines);
-      }
-
-      stats.plateCount = renderer.bundles.size;
-      onProgress?.(plateIndex + 1, plateGroups.length);
-      checkCreateSignal(options.signal);
-      if ((plateIndex + 1) % 8 === 0) {
-        viewer.scene.requestRender();
-        await nextFrame(options.signal);
+        stats.plateCount = renderer.bundles.size;
+        onProgress?.(plateIndex + 1, plateGroups.length);
         checkCreateSignal(options.signal);
+        if ((plateIndex + 1) % 8 === 0) {
+          viewer.scene.requestRender();
+          await nextFrame(options.signal);
+          checkCreateSignal(options.signal);
+        }
       }
-    }
 
-    checkCreateSignal(options.signal);
-    return renderer;
+      checkCreateSignal(options.signal);
+      return renderer;
     } catch (error) {
       try {
         renderer.destroy();
@@ -693,96 +693,96 @@ export class PlateRenderer {
     let staging: RectangleStaging | undefined;
 
     try {
-    for (const group of frame.plates) {
-      if (!group.hasRotation) {
-        continue;
-      }
-      for (const polygon of group.polygons) {
-        // Validity is pinned per frame; an invalid polygon is not staged at
-        // all rather than staged hidden, so the committed frame never shows a
-        // stale reconstruction.
-        if (!polygon.timeValid) {
+      for (const group of frame.plates) {
+        if (!group.hasRotation) {
           continue;
         }
-        const id = this.createPickId(polygon.feature, polygon.pick.polygonIndex);
-        instances.push(
-          new GeometryInstance({
-            id,
-            geometry: polygon.geometry,
-            // The plate rotation is baked here, at build time; the primitive
-            // itself stays identity and lets the native pipeline do the
-            // Geographic (IDL) projection.
-            modelMatrix: group.rotationMatrix,
-            attributes: {
-              color: ColorGeometryInstanceAttribute.fromColor(
-                colorForPlate(group.plateId, 0.9 * this.plateGeometryOpacity),
-              ),
-              show: new ShowGeometryInstanceAttribute(false),
-            },
-          }),
-        );
-        renderedInstances.push({ id, feature: polygon.feature });
+        for (const polygon of group.polygons) {
+          // Validity is pinned per frame; an invalid polygon is not staged at
+          // all rather than staged hidden, so the committed frame never shows a
+          // stale reconstruction.
+          if (!polygon.timeValid) {
+            continue;
+          }
+          const id = this.createPickId(polygon.feature, polygon.pick.polygonIndex);
+          instances.push(
+            new GeometryInstance({
+              id,
+              geometry: polygon.geometry,
+              // The plate rotation is baked here, at build time; the primitive
+              // itself stays identity and lets the native pipeline do the
+              // Geographic (IDL) projection.
+              modelMatrix: group.rotationMatrix,
+              attributes: {
+                color: ColorGeometryInstanceAttribute.fromColor(
+                  colorForPlate(group.plateId, 0.9 * this.plateGeometryOpacity),
+                ),
+                show: new ShowGeometryInstanceAttribute(false),
+              },
+            }),
+          );
+          renderedInstances.push({ id, feature: polygon.feature });
 
-        const outlineColor = Color.fromCssColorString("#e6dec8").withAlpha(
-          0.46 * this.plateGeometryOpacity,
-        );
-        for (const ring of polygon.outlineRings) {
-          const polyline = outlines.add({
-            // Rotated on the CPU; Mollweide seam pieces deliberately stay open.
-            // The collection stays identity. Cesium owns a fresh material per line.
-            id,
-            positions: ring,
-            width: 0.75,
-            material: Material.fromType("Color", { color: outlineColor }),
-            show: false,
-          });
-          renderedOutlines.push({ feature: polygon.feature, polyline });
+          const outlineColor = Color.fromCssColorString("#e6dec8").withAlpha(
+            0.46 * this.plateGeometryOpacity,
+          );
+          for (const ring of polygon.outlineRings) {
+            const polyline = outlines.add({
+              // Rotated on the CPU; Mollweide seam pieces deliberately stay open.
+              // The collection stays identity. Cesium owns a fresh material per line.
+              id,
+              positions: ring,
+              width: 0.75,
+              material: Material.fromType("Color", { color: outlineColor }),
+              show: false,
+            });
+            renderedOutlines.push({ feature: polygon.feature, polyline });
+          }
         }
       }
-    }
 
-    const collection = this.scenePrimitiveCollection();
-    if (collection === null) {
-      throw new Error("Cannot stage a rectangle frame: the scene is gone.");
-    }
-    if (instances.length > 0) {
-      fill = this.ownPrimitive(new Primitive({
-        geometryInstances: instances,
-        appearance: new PerInstanceColorAppearance({
-          flat: true,
-          translucent: true,
-          closed: false,
-          faceForward: true,
-        }),
-        asynchronous: false,
-        releaseGeometryInstances: true,
-      }));
-      fill.show = true;
-      collection.add(fill);
-    }
-    if (renderedOutlines.length > 0) {
-      outlines.show = true;
-      collection.add(outlines);
-    } else {
-      this.releaseOwnedPrimitive(outlines);
-    }
+      const collection = this.scenePrimitiveCollection();
+      if (collection === null) {
+        throw new Error("Cannot stage a rectangle frame: the scene is gone.");
+      }
+      if (instances.length > 0) {
+        fill = this.ownPrimitive(new Primitive({
+          geometryInstances: instances,
+          appearance: new PerInstanceColorAppearance({
+            flat: true,
+            translucent: true,
+            closed: false,
+            faceForward: true,
+          }),
+          asynchronous: false,
+          releaseGeometryInstances: true,
+        }));
+        fill.show = true;
+        collection.add(fill);
+      }
+      if (renderedOutlines.length > 0) {
+        outlines.show = true;
+        collection.add(outlines);
+      } else {
+        this.releaseOwnedPrimitive(outlines);
+      }
 
-    staging = {
-      generation,
-      timeMa: frame.timeMa,
-      fill,
-      outlines: renderedOutlines.length > 0 ? outlines : undefined,
-      instances: renderedInstances,
-      renderedOutlines,
-    };
-    this.rectangleStaging = staging;
+      staging = {
+        generation,
+        timeMa: frame.timeMa,
+        fill,
+        outlines: renderedOutlines.length > 0 ? outlines : undefined,
+        instances: renderedInstances,
+        renderedOutlines,
+      };
+      this.rectangleStaging = staging;
 
       await this.warmUpRectangleFrame(staging);
     } catch (error) {
       // If another operation cleared the slot, it already attempted cleanup.
       // Failed releases remain in ownedPrimitives for explicit destroy retry.
       if (!staging || this.rectangleStaging === staging) {
-        this.rectangleStaging = undefined;
+        if (staging) this.rectangleStaging = undefined;
         try {
           this.releasePrimitives([fill, outlines]);
         } catch (cleanupError) {
@@ -1235,7 +1235,6 @@ export class PlateRenderer {
    * idempotent.
    */
   private releaseOwnedPrimitive(primitive: ReleasablePrimitive): void {
-    if (!this.ownedPrimitives.has(primitive)) return;
     const collection = this.scenePrimitiveCollection();
     if (collection === null) {
       this.ownedPrimitives.delete(primitive);

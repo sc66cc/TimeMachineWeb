@@ -7,6 +7,7 @@
  */
 
 export const AGENT_ACTIONS = {
+  addPanelSetVisible: "ui.addPanel.setVisible",
   authDialogClose: "ui.authDialog.close",
   authDialogOpen: "ui.authDialog.open",
   authLogin: "auth.login",
@@ -19,6 +20,9 @@ export const AGENT_ACTIONS = {
   cameraZoom: "camera.zoom",
   cameraPan: "camera.pan",
   catalogRefresh: "catalog.refresh",
+  consoleClear: "ui.console.clear",
+  consoleSelectOutput: "ui.console.selectOutput",
+  consoleSetVisible: "ui.console.setVisible",
   datasetSelect: "dataset.select",
   exportPlaceholder: "export.run",
   featureSelect: "feature.select",
@@ -58,6 +62,7 @@ export const AGENT_ACTIONS = {
   publishPlaceholder: "publish.run",
   rasterSelect: "raster.select",
   sidebarSelect: "ui.sidebar.select",
+  sidebarSetVisible: "ui.sidebar.setVisible",
   timeSet: "time.set",
   timeSetPlaying: "time.setPlaying",
   timeSetSpeed: "time.setSpeed",
@@ -71,12 +76,14 @@ export const AGENT_ACTIONS = {
   uploadClose: "upload.close",
   uploadOpen: "upload.open",
   uploadRun: "upload.run",
+  welcomeSetVisible: "ui.welcome.setVisible",
 } as const;
 
 export type AgentActionId = (typeof AGENT_ACTIONS)[keyof typeof AGENT_ACTIONS];
 
 /** Human-readable titles, kept beside the ids so the two cannot drift. */
 export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
+  [AGENT_ACTIONS.addPanelSetVisible]: "Open or close the add layer panel",
   [AGENT_ACTIONS.accountMenuSetVisible]: "Show or hide the account menu",
   [AGENT_ACTIONS.accountMenuToggle]: "Toggle the account menu or open the sign-in dialog",
   [AGENT_ACTIONS.authDialogClose]: "Close the sign-in dialog",
@@ -89,6 +96,9 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
   [AGENT_ACTIONS.cameraZoom]: "Zoom the flat map",
   [AGENT_ACTIONS.cameraPan]: "Pan the flat map",
   [AGENT_ACTIONS.catalogRefresh]: "Refresh the plate model catalog",
+  [AGENT_ACTIONS.consoleClear]: "Clear the development console output",
+  [AGENT_ACTIONS.consoleSelectOutput]: "Select the development console output",
+  [AGENT_ACTIONS.consoleSetVisible]: "Open or close the development console",
   [AGENT_ACTIONS.datasetSelect]: "Select a versioned point dataset",
   [AGENT_ACTIONS.exportPlaceholder]: "Export the project",
   [AGENT_ACTIONS.featureSelect]: "Select a feature",
@@ -128,6 +138,7 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
   [AGENT_ACTIONS.publishPlaceholder]: "Publish the project",
   [AGENT_ACTIONS.rasterSelect]: "Select the single raster layer source",
   [AGENT_ACTIONS.sidebarSelect]: "Switch the sidebar tab",
+  [AGENT_ACTIONS.sidebarSetVisible]: "Show or hide the sidebar",
   [AGENT_ACTIONS.timeSet]: "Set the geological age",
   [AGENT_ACTIONS.timeSetPlaying]: "Play or pause the time animation",
   [AGENT_ACTIONS.timeSetSpeed]: "Set the playback speed",
@@ -141,6 +152,7 @@ export const AGENT_ACTION_TITLES: Record<AgentActionId, string> = {
   [AGENT_ACTIONS.uploadClose]: "Close the upload wizard",
   [AGENT_ACTIONS.uploadOpen]: "Open the upload wizard",
   [AGENT_ACTIONS.uploadRun]: "Run the dataset ingest",
+  [AGENT_ACTIONS.welcomeSetVisible]: "Show or hide the welcome panel",
 };
 
 import { agentActions } from "./registry";
@@ -374,6 +386,39 @@ const DECLARATIONS: readonly Declaration[] = [
     params: [],
   },
   { description: "Switch the sidebar tab.", id: AGENT_ACTIONS.sidebarSelect, params: [STR("tab", "'layers' or 'plate-models'.")] },
+  {
+    description: "Show or hide the sidebar. The sidebar stays mounted; hiding it only removes it from view and from the tab order, and the map uses the freed width.",
+    id: AGENT_ACTIONS.sidebarSetVisible,
+    params: [BOOL("visible", "True to show the sidebar.")],
+  },
+  {
+    description: "Open or close the collapsed add-layer panel, optionally selecting one of the six layer kinds.",
+    id: AGENT_ACTIONS.addPanelSetVisible,
+    params: [
+      BOOL("visible", "True to show the add panel."),
+      STR("kind", "Optional kind: 'group', 'point', 'line', 'polygon', 'raster' or 'atlas'.", false),
+    ],
+  },
+  {
+    description: "Show or hide the welcome panel. It is closed by default and never covers the map until it is opened.",
+    id: AGENT_ACTIONS.welcomeSetVisible,
+    params: [BOOL("visible", "True to show the welcome panel.")],
+  },
+  {
+    description: "Show or hide the development console. Retained output survives closing it.",
+    id: AGENT_ACTIONS.consoleSetVisible,
+    params: [BOOL("visible", "True to show the console.")],
+  },
+  {
+    description: "Clear the retained console output. A running job keeps running; use jobs cancel to request cancellation.",
+    id: AGENT_ACTIONS.consoleClear,
+    params: [],
+  },
+  {
+    description: "Focus and select the retained console output for copying. Fails when the console is closed or has no output.",
+    id: AGENT_ACTIONS.consoleSelectOutput,
+    params: [],
+  },
   {
     description: "Filter the sidebar layer list by a substring.",
     id: AGENT_ACTIONS.layerSearchSet,

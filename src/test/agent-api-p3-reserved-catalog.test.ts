@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const SHELL_UI_ACTIONS = [
+  "ui.addPanel.setVisible",
+  "ui.console.clear",
+  "ui.console.selectOutput",
+  "ui.console.setVisible",
+  "ui.sidebar.setVisible",
+  "ui.welcome.setVisible",
+] as const;
+
 const commands = ["model.bind", "model.setAnchor", "viewport.create", "viewport.close", "viewport.activate", "viewport.layout", "camera.sync"];
 const queries = ["raster.sample", "viewports.snapshot"];
 const ids = [...commands, ...queries];
@@ -29,8 +38,11 @@ describe("P3 reserved model, viewport and sampling catalog", () => {
       expect(matches[0]!.requirements, id).toContain(id.startsWith("model.") ? "P3-01-model-binding" : id === "raster.sample" ? "P3-06-original-value-source" : "P3-07-viewports");
       expect(matches[0]!.reason, id).not.toContain("P2-05");
     }
-    expect(target.timeMachineAgent!.listActions()).toHaveLength(64);
-    expect(target.timeMachineAgent!.listActions().some(row => ids.includes(row.id))).toBe(false);
+    const actions = target.timeMachineAgent!.listActions();
+    expect(actions).toHaveLength(70);
+    expect(actions.filter(row => !(SHELL_UI_ACTIONS as readonly string[]).includes(row.id))).toHaveLength(64);
+    for (const id of SHELL_UI_ACTIONS) expect(actions.some(row => row.id === id), id).toBe(true);
+    expect(actions.some(row => ids.includes(row.id))).toBe(false);
     expect(api().catalog.list({ idPrefix: "raster.", kind: "query" }).map(row => row.id)).toEqual(["raster.sample"]);
   });
 

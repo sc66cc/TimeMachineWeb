@@ -10,6 +10,7 @@ import { LAYER_STATE_EVENT, LAYER_VISIBILITY_CHANGE_EVENT, LAYER_OPACITY_CHANGE_
 import { ProjectSession, RUNTIME_LAYER_IDS } from "../project/project-session";
 import type { Phase1BState } from "../phase1b/cloud-client";
 import { mountAppShell } from "./support/mount-app-shell";
+import { openAddLayerPanel } from "./support/add-layer-panel";
 
 const fixture = vi.hoisted(() => ({ state: undefined as Phase1BState | undefined }));
 vi.mock("../phase1b/cloud-client", async importOriginal => ({
@@ -94,7 +95,7 @@ function add(name: string, rasterId: unknown = "temperature_000"): number {
   return session.addLayer({ name, type: ProjectLayerType.Raster, sourceRef: "local:single-raster-manifest", groupId: 101, active: true, alpha: 1, rasterId });
 }
 async function settle(): Promise<void> { await Promise.resolve(); await nextTick(); await new Promise(resolve => setTimeout(resolve, 0)); }
-async function mount(): Promise<void> { mounted = await mountAppShell(); publish(); await settle(); }
+async function mount(): Promise<void> { mounted = await mountAppShell(); publish(); await settle(); await openAddLayerPanel("raster"); await settle(); }
 async function field(selector: string, value: string, event = "change"): Promise<void> {
   const input = element<HTMLInputElement | HTMLSelectElement>(selector); input.value = value; input.dispatchEvent(new Event(event, { bubbles: true })); await settle();
 }

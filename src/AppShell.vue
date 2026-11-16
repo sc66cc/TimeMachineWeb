@@ -1,7 +1,68 @@
 <script setup lang="ts">
-import AceternityWelcome from "./components/AceternityWelcome.vue";
 import DevelopmentConsole from "./components/DevelopmentConsole.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch, type WatchStopHandle } from "vue";
+import AddLayerPanel, { type AddLayerKind } from "./components/vueui/shell/AddLayerPanel.vue";
+import WelcomePanel from "./components/vueui/shell/WelcomePanel.vue";
+import { Badge } from "@/components/vueui/badge";
+import { Button } from "@/components/vueui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/vueui/collapsible";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/vueui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/vueui/dropdown-menu";
+import { Input } from "@/components/vueui/input";
+import { labelTextShadow, readableLabelColor } from "./ui/timeline-label-contrast";
+import { Label } from "@/components/vueui/label";
+import { NativeSelect, NativeSelectOption } from "@/components/vueui/native-select";
+import { ScrollArea } from "@/components/vueui/scroll-area";
+import { Separator } from "@/components/vueui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/vueui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/vueui/tooltip";
+import {
+  Bell,
+  BoxSelect,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CircleHelp,
+  CloudUpload,
+  Database,
+  Download,
+  Globe,
+  Globe2,
+  House,
+  Info,
+  Layers,
+  MoreHorizontal,
+  PanelLeft,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Store,
+  Trash2,
+  Upload,
+  X,
+} from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type WatchStopHandle } from "vue";
 import {
   ProjectLayerType,
   type ProjectRevisionSummaryRO,
@@ -111,6 +172,127 @@ const projectReportOpen = computed(() => projectReadOnly.value || Boolean(projec
   Boolean(phase1B.value.projectContextError) || Boolean(projectState.value?.compatibility.issues.length) ||
   Boolean(projectState.value?.review) || projectState.value?.localSave.status === "error" || projectState.value?.cloudSave.status === "error");
 
+/*
+ * Workbench panel state. Each value below has exactly one writer: the setter
+ * used by the button, the keyboard path and the registered action handler, so
+ * the UI never both mutates a ref and dispatches the same action.
+ */
+interface ConsoleHandle {
+  clear(): void;
+  selectOutput(): boolean;
+  snapshot(): { entries: number; pending: number };
+}
+
+const ADD_PANEL_KINDS: readonly AddLayerKind[] = ["group", "point", "line", "polygon", "raster", "atlas"];
+const addPanelOpen = ref(false);
+const addPanelKind = ref<AddLayerKind>("group");
+const welcomeOpen = ref(false);
+const consoleOpen = ref(false);
+const sidebarVisible = ref(true);
+const consoleRef = ref<ConsoleHandle>();
+const projectDetailsOpen = ref(false);
+const consoleSummary = computed(() => consoleRef.value?.snapshot() ?? { entries: 0, pending: 0 });
+const addPanelGroups = computed(() => orderedLayerGroups.value.map((group) => ({
+  id: group.id,
+  name: group.name,
+  depth: groupDepth(group.id),
+})));
+
+function setAddPanelVisible(visible: boolean, kind?: AddLayerKind): void {
+  addPanelOpen.value = visible;
+  if (kind) addPanelKind.value = kind;
+}
+
+function setAddPanelKind(kind: AddLayerKind): void {
+  addPanelKind.value = kind;
+}
+
+/** Focus goes back to the trigger only when the panel closes from the panel. */
+function focusAddPanelTrigger(): void {
+  void nextTick(() => {
+    document.querySelector<HTMLElement>('[data-action="ui.addPanel.setVisible"]')?.focus();
+  });
+}
+
+function closeAddPanel(): void {
+  setAddPanelVisible(false);
+  focusAddPanelTrigger();
+}
+
+function toggleAddPanel(): void {
+  setAddPanelVisible(!addPanelOpen.value);
+}
+
+function setWelcomeVisible(visible: boolean): void {
+  welcomeOpen.value = visible;
+}
+
+function setConsoleVisible(visible: boolean): void {
+  consoleOpen.value = visible;
+}
+
+/**
+ * One writer for the drawer: the top bar toggle and the action both land here.
+ * Closing while focus sits inside the drawer hands focus back to the toggle, so
+ * the keyboard path never ends on the now-inert panel or on `<body>`.
+ */
+function setSidebarVisible(visible: boolean): void {
+  const focusWasInSidebar = Boolean(document.activeElement?.closest("#tm-sidebar"));
+  const wasVisible = sidebarVisible.value;
+  sidebarVisible.value = visible;
+  if (wasVisible && !visible && focusWasInSidebar) {
+    void nextTick(() => {
+      document.querySelector<HTMLElement>('[data-action="ui.sidebar.setVisible"]')?.focus();
+    });
+  }
+}
+
+/** The one writer for the sign-in dialog: button, Dialog and action all call it. */
+function setAuthDialogOpen(open: boolean): void {
+  authDialogVisible.value = open;
+  if (!open) {
+    // The dialog has no DialogTrigger of its own, so focus goes back to the
+    // account button that opens it.
+    void nextTick(() => {
+      document.querySelector<HTMLElement>('[data-action="ui.accountMenu.toggle"]')?.focus();
+    });
+  }
+}
+
+function setAuthMode(mode: unknown): void {
+  if (mode === "account" || mode === "email-code") authMode.value = mode;
+}
+
+function selectSidebarTab(tab: unknown): void {
+  if (tab === "layers" || tab === "plate-models") activeSidebarTab.value = tab;
+}
+
+/**
+ * The account menu is a controlled DropdownMenu. A signed-out trigger opens the
+ * sign-in dialog instead of an empty menu, which is the old behaviour.
+ */
+function setAccountMenuOpen(open: boolean): void {
+  if (!phase1B.value.account) {
+    if (open) setAuthDialogOpen(true);
+    accountMenuVisible.value = false;
+    return;
+  }
+  accountMenuVisible.value = open;
+}
+
+function handleProjectStatusToggle(event: Event): void {
+  projectDetailsOpen.value = (event.currentTarget as HTMLDetailsElement).open;
+}
+
+/** Escape closes the expanded status card and returns focus to its summary. */
+function closeProjectStatus(event: KeyboardEvent): void {
+  const details = event.currentTarget as HTMLDetailsElement;
+  if (!details.open) return;
+  details.open = false;
+  projectDetailsOpen.value = false;
+  details.querySelector<HTMLElement>("summary")?.focus();
+}
+
 function requireProjectEditable(): void {
   if (projectReadOnly.value) throw new AgentActionUnsupportedError(projectReadOnlyReason.value);
 }
@@ -192,12 +374,12 @@ const unsubscribeStateSections: (() => void)[] = [];
 let stopUiStateWatch: WatchStopHandle | undefined;
 
 const moduleItems = [
-  { icon: "◇", label: "Layer" },
-  { icon: "◎", label: "Atlas" },
-  { icon: "▱", label: "Database" },
-  { icon: "⠿", label: "Multi Globe" },
-  { icon: "▰", label: "Project Market" },
-  { icon: "▦", label: "Area Tool" },
+  { icon: Layers, label: "Layer" },
+  { icon: Globe, label: "Atlas" },
+  { icon: Database, label: "Database" },
+  { icon: Globe2, label: "Multi Globe" },
+  { icon: Store, label: "Project Market" },
+  { icon: BoxSelect, label: "Area Tool" },
 ] as const;
 
 const stageSegments: TimelineSegment[] = [
@@ -849,24 +1031,16 @@ function handleLayerState(event: Event): void {
   }
 }
 
-function relativeLuminance(color: string): number {
-  const channels = [1, 3, 5].map((start) => {
-    const value = Number.parseInt(color.slice(start, start + 2), 16) / 255;
-    return value <= 0.04045
-      ? value / 12.92
-      : ((value + 0.055) / 1.055) ** 2.4;
-  });
-  return (
-    0.2126 * (channels[0] ?? 0) +
-    0.7152 * (channels[1] ?? 0) +
-    0.0722 * (channels[2] ?? 0)
-  );
-}
-
+/**
+ * Band colour is data and stays untouched; only the label adapts, to whichever
+ * of black/white has the higher WCAG ratio on that exact band colour.
+ */
 function segmentStyle(segment: TimelineSegment): Record<string, string> {
+  const label = readableLabelColor(segment.color);
   return {
     background: segment.color,
-    color: relativeLuminance(segment.color) < 0.36 ? "#fff" : "#24343b",
+    color: label,
+    textShadow: labelTextShadow(label),
     flex: `${segment.weight} 1 0px`,
   };
 }
@@ -880,7 +1054,7 @@ function toggleAccountMenu(): void {
   if (phase1B.value.account) {
     accountMenuVisible.value = !accountMenuVisible.value;
   } else {
-    authDialogVisible.value = true;
+    setAuthDialogOpen(true);
   }
 }
 
@@ -903,7 +1077,7 @@ function showToast(message: string): void {
  */
 async function requestProjectSave(): Promise<void> {
   if (!phase1B.value.account) {
-    authDialogVisible.value = true;
+    setAuthDialogOpen(true);
     showToast(
       phase1B.value.status === "disabled"
         ? phase1B.value.message
@@ -998,7 +1172,7 @@ async function signIn(
     if (!state.account) {
       throw new AgentActionValidationError("Sign-in did not produce a session.");
     }
-    authDialogVisible.value = false;
+    setAuthDialogOpen(false);
     return state;
   } catch (error) {
     // Verification codes are also secrets even though the general API uses
@@ -1114,14 +1288,14 @@ function handleProjectSaveError(event: Event): void {
 }
 
 function handleAuthRequired(): void {
-  authDialogVisible.value = true;
+  setAuthDialogOpen(true);
 }
 
 function requireUploadAccess(): void {
   requireProjectEditable();
   requireV2Workspace(phase1B.value.v2WorkspaceAvailable, "dataset ingest");
   if (!phase1B.value.account) {
-    authDialogVisible.value = true;
+    setAuthDialogOpen(true);
     throw new AgentActionAuthError("Sign in to upload a dataset.");
   }
 }
@@ -1193,6 +1367,11 @@ function dismissUploadWizard(): void {
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error));
   }
+}
+
+/** One writer for Dialog-driven open changes (Esc, overlay, close button). */
+function handleUploadDialogOpen(open: boolean): void {
+  if (!open) dismissUploadWizard();
 }
 
 async function selectUploadFile(event: Event): Promise<void> {
@@ -1536,15 +1715,77 @@ function registerAgentActions(): void {
         "ui.sidebar.select 'tab' must be 'layers' or 'plate-models'.",
       );
     }
-    activeSidebarTab.value = tab;
+    selectSidebarTab(tab);
     return { data: { tab } };
   });
+  ready(AGENT_ACTIONS.sidebarSetVisible, (params) => {
+    if (typeof params.visible !== "boolean") {
+      throw new AgentActionValidationError(
+        "ui.sidebar.setVisible requires a boolean 'visible'.",
+      );
+    }
+    setSidebarVisible(params.visible);
+    return { data: { visible: sidebarVisible.value } };
+  });
+  ready(AGENT_ACTIONS.addPanelSetVisible, (params) => {
+    const visible = params.visible;
+    if (typeof visible !== "boolean") {
+      throw new AgentActionValidationError(
+        "ui.addPanel.setVisible requires a boolean 'visible'.",
+      );
+    }
+    const kind = params.kind;
+    if (kind !== undefined && !ADD_PANEL_KINDS.includes(kind as AddLayerKind)) {
+      throw new AgentActionValidationError(
+        `ui.addPanel.setVisible 'kind' must be one of ${ADD_PANEL_KINDS.join(", ")}.`,
+      );
+    }
+    setAddPanelVisible(visible, kind as AddLayerKind | undefined);
+    return { data: { kind: addPanelKind.value, visible: addPanelOpen.value } };
+  });
+  ready(AGENT_ACTIONS.welcomeSetVisible, (params) => {
+    if (typeof params.visible !== "boolean") {
+      throw new AgentActionValidationError(
+        "ui.welcome.setVisible requires a boolean 'visible'.",
+      );
+    }
+    setWelcomeVisible(params.visible);
+    return { data: { visible: welcomeOpen.value } };
+  });
+  ready(AGENT_ACTIONS.consoleSetVisible, (params) => {
+    if (typeof params.visible !== "boolean") {
+      throw new AgentActionValidationError(
+        "ui.console.setVisible requires a boolean 'visible'.",
+      );
+    }
+    setConsoleVisible(params.visible);
+    return { data: { visible: consoleOpen.value } };
+  });
+  ready(AGENT_ACTIONS.consoleClear, () => {
+    const handle = consoleRef.value;
+    if (!handle) {
+      throw new AgentActionUnsupportedError("The development console is not mounted.");
+    }
+    // Output only: a running job keeps running.
+    handle.clear();
+    return { data: { ...handle.snapshot() } };
+  });
+  ready(AGENT_ACTIONS.consoleSelectOutput, () => {
+    const handle = consoleRef.value;
+    // Never a fake success: closed panel or empty transcript has nothing to select.
+    if (!handle || !handle.selectOutput()) {
+      throw new AgentActionValidationError(
+        "ui.console.selectOutput needs an open console with retained output.",
+      );
+    }
+    return { data: { selected: true } };
+  });
   ready(AGENT_ACTIONS.authDialogOpen, () => {
-    authDialogVisible.value = true;
+    setAuthDialogOpen(true);
     return {};
   });
   ready(AGENT_ACTIONS.authDialogClose, () => {
-    authDialogVisible.value = false;
+    setAuthDialogOpen(false);
     return {};
   });
   ready(AGENT_ACTIONS.authModeSet, (params) => {
@@ -1554,7 +1795,7 @@ function registerAgentActions(): void {
         "ui.authMode.set 'mode' must be 'account' or 'email-code'.",
       );
     }
-    authMode.value = mode;
+    setAuthMode(mode);
     return { data: { mode } };
   });
   ready(AGENT_ACTIONS.toolbarToggle, () => {
@@ -1685,6 +1926,15 @@ function uiSnapshot(): Record<string, unknown> {
     projectStateReady: Boolean(projectState.value),
     projectActionBusy: projectActionBusy.value,
     projectActionError: projectActionError.value,
+    addPanelOpen: addPanelOpen.value,
+    addPanelKind: addPanelKind.value,
+    welcomeOpen: welcomeOpen.value,
+    consoleOpen: consoleOpen.value,
+    consoleEntryCount: consoleSummary.value.entries,
+    consolePendingCount: consoleSummary.value.pending,
+    projectStatusOpen: projectDetailsOpen.value || projectReportOpen.value,
+    toastVisible: toastVisible.value,
+    sidebarVisible: sidebarVisible.value,
   };
 }
 
@@ -1699,6 +1949,11 @@ function sessionSummary(): Record<string, unknown> {
 }
 
 onMounted(() => {
+  // Default desktop shows the sidebar; a narrow first paint starts collapsed so
+  // the map uses the available width instead of a 254px strip.
+  if (typeof window.matchMedia === "function" && window.matchMedia("(max-width: 1023px)").matches) {
+    sidebarVisible.value = false;
+  }
   unsubscribePhase1B = phase1BCloudClient.subscribe((state) => {
     phase1B.value = state;
     if (state.account && !authEmail.value) {
@@ -1733,109 +1988,167 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="viewport">
-    <AceternityWelcome />
-    <DevelopmentConsole />
-    <div class="stage">
-      <header class="topbar">
-        <button
-          class="menu-button"
-          type="button"
-          aria-label="Open main menu"
-          data-action="ui.menu.toggle"
-        >☰</button>
-        <div class="brand" aria-label="Global Paleogeographic Collaboration Network">
-          <span class="brand__seal">GPCN</span>
-          <span class="brand__copy">Global Paleogeographic<br />Collaboration Network</span>
-        </div>
-        <button
-          class="top-action"
-          type="button"
-          :disabled="projectReadOnly || projectActionBusy || projectState?.localSave.status === 'saving'"
-          data-action="project.saveLocal"
-          @click="executeProjectAction(AGENT_ACTIONS.projectSaveLocal, {}, 'Local draft saved')"
-        >Save locally</button>
-        <button
-          class="top-action"
-          type="button"
-          :disabled="projectReadOnly || !projectState?.compatibility.cloudWritable || projectActionBusy || projectState?.cloudSave.status === 'saving' || Boolean(phase1B.projectContextError)"
-          data-action="project.save"
-          @click="requestProjectSave"
-        >
-          <span>⇧</span> Save to Cloud
-        </button>
-        <span class="draft-pill">
-          {{ phase1B.projectContextError ? 'Cloud context error' : cloudSaveLabel }}
-        </span>
-        <input
-          id="project-name"
-          class="project-name"
-          value="Untitled_6/5/2025 6:10:11 AM"
-          aria-label="Project name"
-          :disabled="projectReadOnly" data-action="project.setName"
-        />
-        <div class="app-title">Time Machine</div>
-        <div class="topbar__spacer"></div>
-        <div class="account-area">
+    <DevelopmentConsole ref="consoleRef" :open="consoleOpen" @update:open="setConsoleVisible" />
+    <WelcomePanel :open="welcomeOpen" @update:open="setWelcomeVisible" />
+    <div class="stage" :data-sidebar-hidden="sidebarVisible ? undefined : 'true'">
+      <header class="topbar tm-ui">
+        <TooltipProvider :delay-duration="300">
+          <p id="tm-future-note" class="visually-hidden">Not implemented in this build.</p>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                class="top-icon-button topbar__sidebar-toggle"
+                :aria-label="sidebarVisible ? 'Hide the sidebar' : 'Show the sidebar'"
+                :aria-expanded="sidebarVisible"
+                aria-controls="tm-sidebar"
+                data-action="ui.sidebar.setVisible"
+                @click="setSidebarVisible(!sidebarVisible)"
+              ><PanelLeft /></Button>
+            </TooltipTrigger>
+            <TooltipContent>{{ sidebarVisible ? "Hide the sidebar" : "Show the sidebar" }}</TooltipContent>
+          </Tooltip>
           <button
-            class="sign-in"
+            class="menu-button"
             type="button"
-            :aria-expanded="accountMenuVisible"
-            data-action="ui.accountMenu.toggle"
-            @click="toggleAccountMenu"
-          >
-            <span class="sign-in__avatar"></span>
-            <span>{{ phase1B.account?.name ?? "Not signed in" }}</span>
-          </button>
-          <div v-if="accountMenuVisible && phase1B.account" class="account-menu">
-            <strong>{{ phase1B.account.name }}</strong>
-            <small>{{ phase1B.account.email }}</small>
-            <button
-              type="button"
-              data-action="catalog.refresh"
-              @click="refreshCloudWorkspace"
-            >
-              Refresh cloud
-            </button>
-            <button type="button" data-action="auth.logout" @click="logout">Sign out</button>
+            aria-label="Main menu"
+            aria-describedby="tm-future-note"
+            title="Not implemented in this build"
+            disabled
+            data-action="ui.menu.toggle"
+          >☰</button>
+          <div class="brand" role="group" aria-label="Global Paleogeographic Collaboration Network">
+            <span class="brand__seal">GPCN</span>
+            <span class="brand__copy">Global Paleogeographic<br />Collaboration Network</span>
           </div>
-        </div>
-        <button
-          class="top-action"
-          type="button"
-          :disabled="projectReadOnly" data-action="publish.run"
-          @click="showToast('Publish requires Phase 1B server connection')"
-        >
-          <span>➤</span> Publish
-        </button>
-        <button
-          class="top-action"
-          type="button"
-          data-action="export.run"
-          @click="showToast('Export options will be connected in a later slice')"
-        >
-          <span>⇩</span> Export
-        </button>
-        <button
-          class="top-icon-button"
-          type="button"
-          aria-label="Notifications"
-          data-action="ui.notifications.open"
-        >♟</button>
-        <button
-          class="top-icon-button"
-          type="button"
-          aria-label="Settings"
-          data-action="ui.settings.open"
-        >⚙</button>
-        <button
-          class="top-icon-button"
-          type="button"
-          aria-label="Information"
-          data-action="ui.info.open"
-        >ⓘ</button>
+          <div class="app-title">Time Machine</div>
+          <Button
+            variant="secondary"
+            size="sm"
+            class="top-action"
+            :disabled="projectReadOnly || projectActionBusy || projectState?.localSave.status === 'saving'"
+            data-action="project.saveLocal"
+            @click="executeProjectAction(AGENT_ACTIONS.projectSaveLocal, {}, 'Local draft saved')"
+          >Save locally</Button>
+          <Button
+            variant="default"
+            size="sm"
+            class="top-action"
+            :disabled="projectReadOnly || !projectState?.compatibility.cloudWritable || projectActionBusy || projectState?.cloudSave.status === 'saving' || Boolean(phase1B.projectContextError)"
+            data-action="project.save"
+            @click="requestProjectSave"
+          >
+            <CloudUpload />
+            <span>Save to Cloud</span>
+          </Button>
+          <Badge variant="outline" class="draft-pill" :data-state="projectState?.cloudSave.status ?? 'waiting'">
+            {{ phase1B.projectContextError ? 'Cloud context error' : cloudSaveLabel }}
+          </Badge>
+          <input
+            id="project-name"
+            class="project-name"
+            value="Untitled_6/5/2025 6:10:11 AM"
+            aria-label="Project name"
+            :disabled="projectReadOnly" data-action="project.setName"
+          />
+          <div class="topbar__spacer"></div>
+          <DropdownMenu :open="accountMenuVisible" @update:open="setAccountMenuOpen">
+            <DropdownMenuTrigger as-child>
+              <button
+                class="sign-in"
+                type="button"
+                :aria-expanded="accountMenuVisible"
+                data-action="ui.accountMenu.toggle"
+              >
+                <span class="sign-in__avatar" aria-hidden="true"></span>
+                <span>{{ phase1B.account?.name ?? "Not signed in" }}</span>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="account-menu">
+              <DropdownMenuLabel v-if="phase1B.account" class="account-menu__identity">
+                <strong>{{ phase1B.account.name }}</strong>
+                <small>{{ phase1B.account.email }}</small>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator v-if="phase1B.account" />
+              <DropdownMenuItem data-action="catalog.refresh" @select="refreshCloudWorkspace">
+                <RefreshCw />
+                Refresh cloud
+              </DropdownMenuItem>
+              <DropdownMenuItem data-action="auth.logout" @select="logout">Sign out</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button
+            variant="outline"
+            size="sm"
+            class="top-action"
+            disabled
+            aria-describedby="tm-future-note"
+            title="Not implemented in this build"
+            data-action="publish.run"
+          >
+            <Upload />
+            <span>Publish</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            class="top-action"
+            disabled
+            aria-describedby="tm-future-note"
+            title="Not implemented in this build"
+            data-action="export.run"
+          >
+            <Download />
+            <span>Export</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="top-icon-button"
+            aria-label="Notifications"
+            aria-describedby="tm-future-note"
+            title="Not implemented in this build"
+            disabled
+            data-action="ui.notifications.open"
+          ><Bell /></Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="top-icon-button"
+            aria-label="Settings"
+            aria-describedby="tm-future-note"
+            title="Not implemented in this build"
+            disabled
+            data-action="ui.settings.open"
+          ><Settings /></Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="top-icon-button"
+            aria-label="Information"
+            aria-describedby="tm-future-note"
+            title="Not implemented in this build"
+            disabled
+            data-action="ui.info.open"
+          ><Info /></Button>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                class="top-icon-button"
+                aria-label="Open the welcome panel"
+                data-action="ui.welcome.setVisible"
+                @click="setWelcomeVisible(true)"
+              ><CircleHelp /></Button>
+            </TooltipTrigger>
+            <TooltipContent>Welcome panel</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </header>
 
-      <details class="project-persistence" aria-label="Project persistence" :open="projectReportOpen">
+      <details class="project-persistence tm-ui" aria-label="Project persistence" :open="projectReportOpen" @toggle="handleProjectStatusToggle" @keydown.esc.stop.prevent="closeProjectStatus">
         <summary>
           <span data-testid="local-save-status" :data-state="projectState?.localSave.status ?? 'checking'">{{ localSaveLabel }}</span>
           <span data-testid="cloud-save-status" :data-state="projectState?.cloudSave.status ?? 'waiting'">{{ cloudSaveLabel }}</span>
@@ -1854,8 +2167,8 @@ onBeforeUnmount(() => {
               <span>{{ issue.preserved ? 'Original preserved' : 'See issue details' }}</span>
             </li>
           </ul>
-          <button v-if="projectState.originalAvailable" type="button" :disabled="projectActionBusy" data-action="project.exportOriginal" data-source="current"
-            @click="executeProjectAction(AGENT_ACTIONS.projectExportOriginal, {}, 'Original input download started')">Download original</button>
+          <Button v-if="projectState.originalAvailable" variant="outline" size="xs" :disabled="projectActionBusy" data-action="project.exportOriginal" data-source="current"
+            @click="executeProjectAction(AGENT_ACTIONS.projectExportOriginal, {}, 'Original input download started')">Download original</Button>
           <section v-if="projectState.review" class="project-review" aria-label="Cloud project awaiting review">
             <h3>Cloud project awaiting review</h3>
             <p><strong>{{ redactErrorMessage(projectState.review.name) }}</strong> · schema {{ projectState.review.compatibility.schemaVersion ?? 'unrecognized' }}</p>
@@ -1866,199 +2179,103 @@ onBeforeUnmount(() => {
                 <span>{{ issue.preserved ? 'Original preserved' : 'See issue details' }}</span>
               </li>
             </ul>
-            <button v-if="projectState.review.originalAvailable" type="button" :disabled="projectActionBusy" data-action="project.exportOriginal" data-source="review"
-              @click="executeProjectAction(AGENT_ACTIONS.projectExportOriginal, { source: 'review' }, 'Reviewed original download started')">Download reviewed original</button>
+            <Button v-if="projectState.review.originalAvailable" variant="outline" size="xs" :disabled="projectActionBusy" data-action="project.exportOriginal" data-source="review"
+              @click="executeProjectAction(AGENT_ACTIONS.projectExportOriginal, { source: 'review' }, 'Reviewed original download started')">Download reviewed original</Button>
           </section>
         </template>
         <p v-if="phase1B.projectContextError" data-testid="project-context-error" role="alert">{{ redactErrorMessage(phase1B.projectContextError) }}</p>
         <p v-if="projectActionError" data-testid="project-action-error" role="alert">{{ projectActionError }}</p>
       </details>
 
-      <aside class="sidebar">
-        <div class="sidebar-tabs" role="tablist" aria-label="Data views">
-          <button
-            class="sidebar-tab"
-            type="button"
-            role="tab"
-            :aria-selected="activeSidebarTab === 'layers'"
-            data-action="ui.sidebar.select"
-            @click="activeSidebarTab = 'layers'"
-          >
-            Layer
-          </button>
-          <button
-            class="sidebar-tab"
-            type="button"
-            role="tab"
-            :aria-selected="activeSidebarTab === 'plate-models'"
-            data-action="ui.sidebar.select"
-            @click="activeSidebarTab = 'plate-models'"
-          >
-            Plate Model
-          </button>
-        </div>
+      <aside id="tm-sidebar" class="sidebar tm-ui" :inert="!sidebarVisible" :aria-hidden="sidebarVisible ? undefined : 'true'">
+        <Tabs :model-value="activeSidebarTab" @update:model-value="selectSidebarTab" class="sidebar-tabs-wrap">
+          <TabsList class="sidebar-tabs" aria-label="Data views">
+            <TabsTrigger value="layers" class="sidebar-tab" data-action="ui.sidebar.select">Layer</TabsTrigger>
+            <TabsTrigger value="plate-models" class="sidebar-tab" data-action="ui.sidebar.select">Plate Model</TabsTrigger>
+          </TabsList>
+        </Tabs>
 
-        <label class="layer-search">
-          <span class="visually-hidden">Search layers</span>
-          <input
+        <div class="layer-search">
+          <Search class="layer-search__icon" aria-hidden="true" />
+          <Input
             v-model="layerSearch"
             type="search"
             autocomplete="off"
+            aria-label="Search layers"
             placeholder="Filter layers"
+            class="layer-search__input"
             data-action="ui.layerSearch.set"
           />
-          <span aria-hidden="true">⌕</span>
-        </label>
+        </div>
 
         <div class="sidebar-actions">
-          <button type="button" :disabled="projectReadOnly" data-action="upload.open" @click="showUploadWizard">
-            <b>↥</b><span>Upload to Layer</span>
-          </button>
-          <button type="button" data-action="ui.layerStyle.open" @click="showLayerStyle()">
-            <b>◉</b><span>Layer Style</span>
-          </button>
+          <Button variant="secondary" size="sm" :disabled="projectReadOnly" data-action="upload.open" @click="showUploadWizard">
+            <Upload /><span>Upload to Layer</span>
+          </Button>
+          <Button variant="outline" size="sm" data-action="ui.layerStyle.open" @click="showLayerStyle()">
+            <SlidersHorizontal /><span>Layer Style</span>
+          </Button>
         </div>
 
         <section v-show="activeSidebarTab === 'layers'" class="layer-list" aria-label="Layers">
-          <form class="layer-group-add" aria-label="Add layer group" @submit.prevent="addLayerGroup">
-            <label>
-              <span>Group name</span>
-              <input v-model="newGroupName" aria-label="New group name" autocomplete="off" :disabled="projectReadOnly || groupActionBusy" />
-            </label>
-            <label>
-              <span>Parent</span>
-              <select v-model="newGroupParent" aria-label="New group parent" :disabled="projectReadOnly || groupActionBusy">
-                <option value="">Root</option>
-                <option v-for="parent in orderedLayerGroups" :key="parent.id" :value="String(parent.id)">
-                  {{ "— ".repeat(groupDepth(parent.id)) + parent.name }}
-                </option>
-              </select>
-            </label>
-            <button type="submit" data-action="layer.group.add" :disabled="projectReadOnly || groupActionBusy || !newGroupName.trim()">Add group</button>
-          </form>
+          <Collapsible :open="addPanelOpen" @update:open="setAddPanelVisible">
+            <div class="sidebar-add">
+              <CollapsibleTrigger as-child>
+                <Button
+                  variant="default"
+                  size="sm"
+                  class="sidebar-add__trigger"
+                  aria-controls="add-layer-panel"
+                  data-action="ui.addPanel.setVisible"
+                >
+                  <Plus />
+                  <span>Add layer / group</span>
+                </Button>
+              </CollapsibleTrigger>
+            </div>
+            <CollapsibleContent force-mount>
+              <AddLayerPanel
+            :open="addPanelOpen"
+            :kind="addPanelKind"
+            v-model:groupName="newGroupName"
+            v-model:groupParent="newGroupParent"
+            v-model:pointName="newPointLayerName"
+            v-model:pointGroup="newPointLayerGroup"
+            v-model:lineName="newLineLayerName"
+            v-model:lineGroup="newLineLayerGroup"
+            v-model:polygonName="newPolygonLayerName"
+            v-model:polygonGroup="newPolygonLayerGroup"
+            v-model:rasterName="newRasterLayerName"
+            v-model:rasterGroup="newRasterLayerGroup"
+            v-model:rasterSelection="newRasterLayerSelection"
+            v-model:atlasName="newAtlasLayerName"
+            v-model:atlasGroup="newAtlasLayerGroup"
+            :read-only="projectReadOnly"
+            :group-busy="groupActionBusy"
+            :layer-busy="pointLayerActionBusy"
+            :groups="addPanelGroups"
+            :raster-options="rasterOptions"
+            :atlas-available="atlasSourceAvailable"
+            :atlas-label="atlasSource?.label ?? ''"
+            :point-source-ref="pointFixtureSourceRef"
+            :line-source-ref="lineFixtureSourceRef"
+            :polygon-source-ref="polygonFixtureSourceRef"
+            :raster-source-ref="rasterManifestSourceRef"
+            @update:open="setAddPanelVisible"
+            @update:kind="setAddPanelKind"
+            @add-group="addLayerGroup"
+            @add-point="addPointLayer"
+            @add-line="addLineLayer"
+            @add-polygon="addPolygonLayer"
+            @add-raster="addRasterLayer"
+            @add-atlas="addAtlasLayer"
+            @close="closeAddPanel"
+              />
+            </CollapsibleContent>
+          </Collapsible>
+          <!-- Persistent feedback: the panel may be closed, these errors and
+               statuses must stay visible to the user. -->
           <p v-if="groupActionError" class="layer-group-error" role="alert">{{ groupActionError }}</p>
-          <form class="point-layer-add" aria-label="Add point layer" @submit.prevent="addPointLayer">
-            <label>
-              <span>Source</span>
-              <select aria-label="Point layer source" :value="pointFixtureSourceRef" :disabled="projectReadOnly || pointLayerActionBusy">
-                <option :value="pointFixtureSourceRef">Synthetic point sample</option>
-              </select>
-            </label>
-            <small>Present-day points · explicit synthetic sample</small>
-            <label>
-              <span>Name</span>
-              <input v-model="newPointLayerName" aria-label="Point layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" />
-            </label>
-            <label>
-              <span>Group</span>
-              <select v-model="newPointLayerGroup" aria-label="Point layer group" :disabled="projectReadOnly || pointLayerActionBusy">
-                <option value="" disabled>Choose a group</option>
-                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
-                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
-                </option>
-              </select>
-            </label>
-            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newPointLayerName.trim() || !groupsById.has(Number(newPointLayerGroup))">Add point layer</button>
-            <small v-if="layerGroups.length === 0">Create a group before adding a point layer.</small>
-          </form>
-          <form class="point-layer-add line-layer-add" aria-label="Add line layer" @submit.prevent="addLineLayer">
-            <label>
-              <span>Source</span>
-              <select aria-label="Line layer source" :value="lineFixtureSourceRef" :disabled="projectReadOnly || pointLayerActionBusy">
-                <option :value="lineFixtureSourceRef">Synthetic line sample</option>
-              </select>
-            </label>
-            <small>Source-coordinate lines · not reconstructed · explicit synthetic sample</small>
-            <label>
-              <span>Name</span>
-              <input v-model="newLineLayerName" aria-label="Line layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" />
-            </label>
-            <label>
-              <span>Group</span>
-              <select v-model="newLineLayerGroup" aria-label="Line layer group" :disabled="projectReadOnly || pointLayerActionBusy">
-                <option value="" disabled>Choose a group</option>
-                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
-                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
-                </option>
-              </select>
-            </label>
-            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newLineLayerName.trim() || !groupsById.has(Number(newLineLayerGroup))">Add line layer</button>
-            <small v-if="layerGroups.length === 0">Create a group before adding a line layer.</small>
-          </form>
-          <form class="point-layer-add polygon-layer-add" aria-label="Add polygon layer" @submit.prevent="addPolygonLayer">
-            <label>
-              <span>Source</span>
-              <select aria-label="Polygon layer source" :value="polygonFixtureSourceRef" :disabled="projectReadOnly || pointLayerActionBusy">
-                <option :value="polygonFixtureSourceRef">Synthetic polygon sample</option>
-              </select>
-            </label>
-            <small>Source-coordinate polygons · not reconstructed · explicit synthetic sample</small>
-            <label>
-              <span>Name</span>
-              <input v-model="newPolygonLayerName" aria-label="Polygon layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" />
-            </label>
-            <label>
-              <span>Group</span>
-              <select v-model="newPolygonLayerGroup" aria-label="Polygon layer group" :disabled="projectReadOnly || pointLayerActionBusy">
-                <option value="" disabled>Choose a group</option>
-                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
-                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
-                </option>
-              </select>
-            </label>
-            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newPolygonLayerName.trim() || !groupsById.has(Number(newPolygonLayerGroup))">Add polygon layer</button>
-            <small v-if="layerGroups.length === 0">Create a group before adding a polygon layer.</small>
-          </form>
-          <form class="point-layer-add raster-layer-add" aria-label="Add raster layer" @submit.prevent="addRasterLayer">
-            <label>
-              <span>Source</span>
-              <select aria-label="Raster layer source" :value="rasterManifestSourceRef" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add">
-                <option :value="rasterManifestSourceRef">Single raster manifest</option>
-              </select>
-            </label>
-            <label>
-              <span>Raster</span>
-              <select v-model="newRasterLayerSelection" aria-label="Raster layer selection" :disabled="projectReadOnly || pointLayerActionBusy || rasterOptions.length === 0" data-action="layer.add">
-                <option value="" disabled>Choose a raster</option>
-                <option v-for="option in rasterOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
-              </select>
-            </label>
-            <small v-if="rasterOptions.length === 0">No raster manifest choices are available.</small>
-            <label>
-              <span>Name</span>
-              <input v-model="newRasterLayerName" aria-label="Raster layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add" />
-            </label>
-            <label>
-              <span>Group</span>
-              <select v-model="newRasterLayerGroup" aria-label="Raster layer group" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add">
-                <option value="" disabled>Choose a group</option>
-                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
-                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
-                </option>
-              </select>
-            </label>
-            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newRasterLayerName.trim() || !groupsById.has(Number(newRasterLayerGroup)) || !availableRasterIds.has(newRasterLayerSelection)">Add raster layer</button>
-            <small v-if="layerGroups.length === 0">Create a group before adding a raster layer.</small>
-          </form>
-          <form class="point-layer-add atlas-layer-add" aria-label="Add Atlas layer" @submit.prevent="addAtlasLayer">
-            <p>Source: <span aria-label="Atlas layer source">{{ atlasSourceAvailable ? atlasSource?.label : "Atlas manifest unavailable" }}</span></p>
-            <small>Follows the view's committed age; the nearest available frame is used.</small>
-            <label>
-              <span>Name</span>
-              <input v-model="newAtlasLayerName" aria-label="Atlas layer name" autocomplete="off" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add" />
-            </label>
-            <label>
-              <span>Group</span>
-              <select v-model="newAtlasLayerGroup" aria-label="Atlas layer group" :disabled="projectReadOnly || pointLayerActionBusy" data-action="layer.add">
-                <option value="" disabled>Choose a group</option>
-                <option v-for="group in orderedLayerGroups" :key="group.id" :value="String(group.id)">
-                  {{ "— ".repeat(groupDepth(group.id)) + group.name }}
-                </option>
-              </select>
-            </label>
-            <button type="submit" data-action="layer.add" :disabled="projectReadOnly || pointLayerActionBusy || !newAtlasLayerName.trim() || !groupsById.has(Number(newAtlasLayerGroup)) || !atlasSourceAvailable">Add Atlas layer</button>
-            <small v-if="layerGroups.length === 0">Create a group before adding an Atlas layer.</small>
-          </form>
           <p v-if="pointLayerActionMessage" class="point-layer-action-message" role="status">{{ pointLayerActionMessage }}</p>
           <p v-if="pointLayerActionError" class="point-layer-action-error" role="alert">{{ pointLayerActionError }}</p>
           <!-- One key space preserves main.ts native bindings when a layer changes groups. -->
@@ -2075,15 +2292,20 @@ onBeforeUnmount(() => {
               @dragover.prevent
               @drop.prevent="dropLayerIntoGroup(group.id)"
             >
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                class="layer-group-row__collapse"
                 :aria-label="`${group.collapsed && !layerQuery ? 'Expand' : 'Collapse'} ${group.name}`"
                 :aria-expanded="!group.collapsed || Boolean(layerQuery)"
                 :disabled="projectReadOnly || (Boolean(layerQuery))"
                 :title="layerQuery ? 'Clear the search to change group collapse' : undefined"
                 data-action="layer.group.setCollapsed"
                 @click="toggleGroup(group)"
-              >{{ group.collapsed && !layerQuery ? "›" : "⌄" }}</button>
+              >
+                <ChevronRight v-if="group.collapsed && !layerQuery" />
+                <ChevronDown v-else />
+              </Button>
               <input
                 type="checkbox"
                 :checked="group.active"
@@ -2115,6 +2337,7 @@ onBeforeUnmount(() => {
               <label>
                 <span>Parent</span>
                 <select
+                  class="tm-select"
                   :aria-label="`Move ${group.name} to group`"
                   :value="String(group.parentId ?? '')"
                   :disabled="projectReadOnly || groupActionBusy"
@@ -2127,14 +2350,19 @@ onBeforeUnmount(() => {
                   </option>
                 </select>
               </label>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="xs"
+                class="layer-group-controls__remove"
                 :aria-label="`Delete ${group.name} group`"
                 :aria-describedby="groupIsNonempty(group.id) ? `group-remove-reason-${group.id}` : undefined"
                 :disabled="projectReadOnly || groupActionBusy || groupIsNonempty(group.id)"
                 data-action="layer.group.remove"
                 @click="executeGroupAction(AGENT_ACTIONS.layerGroupRemove, { groupId: group.id })"
-              >Delete</button>
+              >
+                <Trash2 />
+                <span>Delete</span>
+              </Button>
               <small v-if="groupIsNonempty(group.id)" :id="`group-remove-reason-${group.id}`">Contains layers or child groups</small>
             </div>
             </template>
@@ -2218,69 +2446,81 @@ onBeforeUnmount(() => {
               v-if="layer.id === RUNTIME_LAYER_IDS.points"
               class="layer-inline-actions"
             >
-              <button
-                id="load-points"
-                type="button"
-                disabled
-                aria-label="Load points"
-                data-action="points.load"
-                @click.stop
-              >
-                ▶
-              </button>
-              <button
-                id="unload-points"
-                type="button"
-                disabled
-                aria-label="Unload points"
-                data-action="points.unload"
-                @click.stop
-              >
-                ×
-              </button>
+              <Button variant="outline" size="icon-xs" as-child>
+                <button
+                  id="load-points"
+                  type="button"
+                  disabled
+                  aria-label="Load points"
+                  data-action="points.load"
+                  @click.stop
+                >
+                  ▶
+                </button>
+              </Button>
+              <Button variant="outline" size="icon-xs" as-child>
+                <button
+                  id="unload-points"
+                  type="button"
+                  disabled
+                  aria-label="Unload points"
+                  data-action="points.unload"
+                  @click.stop
+                >
+                  ×
+                </button>
+              </Button>
             </span>
             <span v-else-if="isOrdinaryPointLayer(layer) || isOrdinaryLineLayer(layer) || isOrdinaryPolygonLayer(layer) || isOrdinaryRasterLayer(layer) || isOrdinaryAtlasLayer(layer)" class="layer-inline-actions">
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon-xs"
                 :aria-label="`${layer.name} options`"
                 data-action="ui.layerStyle.open"
                 @click.stop="toggleLayerStyle(layer.id)"
-              >•••</button>
-              <button
-                type="button"
+              ><MoreHorizontal /></Button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
                 :aria-label="`Remove ${layer.name} layer`"
                 :disabled="projectReadOnly || pointLayerActionBusy || layer.runtimeStatus === 'removing'"
                 data-action="layer.remove"
                 @click.stop="removePointLayer(layer)"
-              >×</button>
+              ><X /></Button>
             </span>
-            <button
+            <Button
               v-else
-              type="button"
+              variant="ghost"
+              size="icon-xs"
               :aria-label="`${layer.name} options`"
               data-action="ui.layerStyle.open"
               @click.stop="toggleLayerStyle(layer.id)"
-            >•••</button>
-            <button
+            ><MoreHorizontal /></Button>
+            <Button
               v-if="canRetryLayer(layer)"
-              type="button"
+              variant="outline"
+              size="xs"
               class="layer-retry"
               :aria-label="`Retry ${layer.name} layer`"
               :disabled="projectReadOnly || pointLayerActionBusy"
               data-action="layer.retry"
               @click.stop="retryLayer(layer)"
-            >Retry {{ layer.name }} layer</button>
+            >
+              <RotateCcw />
+              <span>Retry {{ layer.name }} layer</span>
+            </Button>
             <div
               v-show="selectedLayerId === layer.id"
               class="layer-style-inline"
               @click.stop
             >
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon-xs"
                 aria-label="Close layer style"
                 data-action="ui.layerStyle.close"
                 @click.stop="closeLayerStyle"
-              >×</button>
+              ><X /></Button>
               <span>Opacity</span>
               <input
                 type="range"
@@ -2495,20 +2735,26 @@ onBeforeUnmount(() => {
           </article>
           </template>
           <p v-if="filteredLayerRows.length === 0 && visibleGroupIds.size === 0" class="layer-empty">
-            No matching layers
+            <span>No matching layers</span>
+            <Button variant="outline" size="xs" data-action="ui.addPanel.setVisible" @click="toggleAddPanel">
+              <Plus />
+              <span>Add layer</span>
+            </Button>
           </p>
         </section>
 
-        <section v-show="activeSidebarTab === 'plate-models'" class="plate-model-list">
+        <ScrollArea v-show="activeSidebarTab === 'plate-models'" class="plate-model-list" aria-label="Plate models">
+          <Separator class="catalog-separator" />
           <div class="catalog-heading catalog-heading--first">
             <strong>Shared plate models</strong>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="icon-xs"
               :disabled="phase1B.sharedPlateModelsStatus === 'loading' || !phase1B.serverUrl"
               aria-label="Refresh shared plate models"
               data-action="catalog.refresh"
               @click="refreshCloudWorkspace"
-            >↻</button>
+            ><RefreshCw /></Button>
           </div>
 
           <p class="catalog-source">
@@ -2556,11 +2802,12 @@ onBeforeUnmount(() => {
                 · {{ item.AgeStart }}–{{ item.AgeEnd }} Ma
               </small>
             </span>
-            <button
-              type="button"
+            <Button
+              variant="outline"
+              size="xs"
               :disabled="projectReadOnly" data-action="model.select"
               @click="selectSharedPlateModel(foreignKeyValue(item.ID))"
-            >Use</button>
+            >Use</Button>
           </article>
 
           <div class="catalog-heading">
@@ -2575,12 +2822,13 @@ onBeforeUnmount(() => {
               <strong>PALEOMAP</strong>
               <small>本地内置演示数据 · 非 Server 公有资源 · 需显式选择</small>
             </span>
-            <button
-              type="button"
+            <Button
+              variant="outline"
+              size="xs"
               :disabled="projectReadOnly || (phase1B.selection.useLocalPlateModelDemo)"
               data-action="model.select"
               @click="selectLocalPlateModelDemo"
-            >Use</button>
+            >Use</Button>
           </article>
           <article class="plate-card dataset-card">
             <span class="plate-card__icon">≋</span>
@@ -2594,12 +2842,13 @@ onBeforeUnmount(() => {
           <template v-if="phase1B.v2WorkspaceAvailable">
             <div class="catalog-heading">
               <strong>Versioned plate models</strong>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon-xs"
                 aria-label="Refresh versioned catalog"
                 data-action="catalog.refresh"
                 @click="refreshCloudWorkspace"
-              >↻</button>
+              ><RefreshCw /></Button>
             </div>
             <article
               v-for="item in publicPlateModels"
@@ -2616,11 +2865,12 @@ onBeforeUnmount(() => {
                 <strong>{{ item.Version.Name }}</strong>
                 <small>v{{ item.Version.VersionNumber }} · {{ item.Version.AgeStartMa }}–{{ item.Version.AgeEndMa }} Ma</small>
               </span>
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="xs"
                 :disabled="projectReadOnly" data-action="model.select"
                 @click="selectPlateModel(foreignKeyValue(item.Version.ID))"
-              >Use</button>
+              >Use</Button>
             </article>
             <article
               v-for="item in publicDatasets"
@@ -2637,11 +2887,12 @@ onBeforeUnmount(() => {
                 <strong>{{ item.Version.Name }}</strong>
                 <small>v{{ item.Version.VersionNumber }} · {{ item.Version.RowCount.toLocaleString() }} rows</small>
               </span>
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="xs"
                 :disabled="projectReadOnly" data-action="dataset.select"
                 @click="selectDataset(foreignKeyValue(item.Version.ID))"
-              >Use</button>
+              >Use</Button>
             </article>
 
             <template
@@ -2669,11 +2920,12 @@ onBeforeUnmount(() => {
                   <strong>{{ item.Version.Name }}</strong>
                   <small>Private · v{{ item.Version.VersionNumber }}</small>
                 </span>
-                <button
-                  type="button"
+                <Button
+                  variant="outline"
+                  size="xs"
                   :disabled="projectReadOnly" data-action="model.select"
                   @click="selectPlateModel(foreignKeyValue(item.Version.ID))"
-                >Use</button>
+                >Use</Button>
               </article>
               <article
                 v-for="item in privateDatasets"
@@ -2690,11 +2942,12 @@ onBeforeUnmount(() => {
                   <strong>{{ item.Version.Name }}</strong>
                   <small>Private · v{{ item.Version.VersionNumber }} · {{ item.Version.RowCount.toLocaleString() }} rows</small>
                 </span>
-                <button
-                  type="button"
+                <Button
+                  variant="outline"
+                  size="xs"
                   :disabled="projectReadOnly" data-action="dataset.select"
                   @click="selectDataset(foreignKeyValue(item.Version.ID))"
-                >Use</button>
+                >Use</Button>
               </article>
             </template>
 
@@ -2711,20 +2964,21 @@ onBeforeUnmount(() => {
                 <strong>{{ project.Name }}</strong>
                 <small>Revision {{ project.RevisionNumber }} · {{ new Date(project.CreateTime).toLocaleDateString() }}</small>
               </span>
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="xs"
                 :disabled="projectReadOnly" data-action="project.open"
                 @click="openCloudProject(project)"
               >
                 Open
-              </button>
+              </Button>
             </article>
           </template>
 
           <p v-else class="catalog-status" data-testid="v2-unavailable">
             {{ phase1B.message || "TimeMachine V2 workspace endpoints are unavailable on this Server." }}
           </p>
-        </section>
+        </ScrollArea>
 
         <div class="runtime-diagnostics" aria-hidden="true">
           <input
@@ -2769,51 +3023,55 @@ onBeforeUnmount(() => {
 
         <nav
           id="module-toolbar"
-          class="module-toolbar"
+          class="module-toolbar tm-ui"
           :class="{ 'is-collapsed': toolbarCollapsed }"
           aria-label="Workspace modules"
         >
-          <button
+          <Button
             v-for="item in moduleItems"
             :key="item.label"
             v-show="!toolbarCollapsed"
-            type="button"
+            variant="ghost"
             class="module-button"
             :class="{ 'is-active': activeModule === item.label }"
             data-action="ui.module.select"
             @click="activeModule = item.label"
           >
-            <b>{{ item.icon }}</b>
+            <component :is="item.icon" aria-hidden="true" />
             <span>{{ item.label }}</span>
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-xs"
             class="toolbar-collapse"
-            type="button"
             :aria-label="toolbarCollapsed ? 'Expand toolbar' : 'Collapse toolbar'"
             data-action="ui.toolbar.toggle"
             @click="toolbarCollapsed = !toolbarCollapsed"
           >
-            {{ toolbarCollapsed ? "›" : "‹" }}
-          </button>
+            <ChevronLeft v-if="!toolbarCollapsed" />
+            <ChevronRight v-else />
+          </Button>
         </nav>
 
-        <div class="time-readout"><strong id="age-value">0.0</strong> <span>Ma</span></div>
-        <p id="era-label" class="era-label">Present day</p>
-        <div class="view-options">
-          <label
-            ><input type="checkbox" data-action="ui.majorCities.setVisible" />
-            <span>Major cities</span></label
-          >
-          <label class="place-search"
-            ><input
-              type="search"
-              placeholder="Input a place name."
-              data-action="ui.placeSearch"
-            /><span>⌕</span></label
-          >
+        <div class="time-readout tm-ui"><strong id="age-value">0.0</strong> <span>Ma</span></div>
+        <p id="era-label" class="era-label tm-ui">Present day</p>
+        <div class="view-options tm-ui">
+          <label class="view-options__future" aria-describedby="tm-future-note">
+            <input type="checkbox" disabled data-action="ui.majorCities.setVisible" />
+            <span>Major cities</span>
+          </label>
+          <Input
+            class="place-search__input view-options__future"
+            type="search"
+            placeholder="Input a place name."
+            aria-label="Search for a place"
+            aria-describedby="tm-future-note"
+            disabled
+            data-action="ui.placeSearch"
+          />
           <label class="projection-control" for="projection-select">
             <span class="projection-control__label">Projection</span>
-            <select id="projection-select" data-action="projection.select" disabled>
+            <select id="projection-select" class="tm-select" data-action="projection.select" disabled>
               <option value="globe">Globe (3D)</option>
               <option value="rectangle">Rectangle</option>
               <option value="mollweide">Mollweide</option>
@@ -2822,64 +3080,73 @@ onBeforeUnmount(() => {
           <p id="projection-status" class="projection-status" aria-live="polite"></p>
         </div>
 
-        <button
-          id="home-camera"
-          class="home-camera"
-          type="button"
-          aria-label="Reset globe view"
-          data-action="camera.reset"
-        >
-          ⌂
-        </button>
+        <Button variant="secondary" size="icon-sm" class="home-camera" as-child>
+          <button
+            id="home-camera"
+            type="button"
+            aria-label="Reset globe view"
+            data-action="camera.reset"
+          >
+            <House aria-hidden="true" />
+          </button>
+        </Button>
 
-        <section class="playback" aria-label="Time playback controls">
-          <div class="playback__grip">••••••••</div>
+        <section class="playback tm-ui" aria-label="Time playback controls">
+          <div class="playback__grip" aria-hidden="true"></div>
           <div class="playback__row">
             <output class="time-box"><span id="playback-age-mirror">0.0</span></output>
             <span class="ma-label">Ma</span>
             <div class="transport">
-              <button
-                type="button"
-                data-age="100"
-                aria-label="Jump to 100 Ma"
-                :disabled="projectReadOnly" data-action="time.set"
-              >
-                ◀
-              </button>
-              <button
-              id="play-button"
-              type="button"
-              aria-label="Play geological time"
-              :disabled="projectReadOnly" data-action="time.setPlaying"
-            >
-                <span class="play-icon" aria-hidden="true"></span>
-                <span data-play-label>Play</span>
-              </button>
-              <button
-                type="button"
-                data-age="0"
-                aria-label="Jump to present"
-                :disabled="projectReadOnly" data-action="time.set"
-              >
-                ▶
-              </button>
+              <Button variant="secondary" size="icon-sm" class="mini-button" as-child>
+                <button
+                  type="button"
+                  data-age="100"
+                  aria-label="Jump to 100 Ma"
+                  :disabled="projectReadOnly" data-action="time.set"
+                >
+                  ◀
+                </button>
+              </Button>
+              <Button variant="secondary" size="icon-sm" class="mini-button" as-child>
+                <button
+                  id="play-button"
+                  type="button"
+                  aria-label="Play geological time"
+                  :disabled="projectReadOnly" data-action="time.setPlaying"
+                >
+                  <span class="play-icon" aria-hidden="true"></span>
+                  <span data-play-label>Play</span>
+                </button>
+              </Button>
+              <Button variant="secondary" size="icon-sm" class="mini-button" as-child>
+                <button
+                  type="button"
+                  data-age="0"
+                  aria-label="Jump to present"
+                  :disabled="projectReadOnly" data-action="time.set"
+                >
+                  ▶
+                </button>
+              </Button>
             </div>
-            <button
-            id="speed-button"
-            class="mini-button"
-            type="button"
-            :disabled="projectReadOnly" data-action="time.setSpeed"
-          >
-            25 Ma/s
-          </button>
-            <button
-            id="today-button"
-            class="mini-button"
-            type="button"
-            :disabled="projectReadOnly" data-action="time.set"
-          >
-            0
-          </button>
+            <Button variant="outline" size="xs" class="mini-button" as-child>
+              <button
+                id="speed-button"
+                type="button"
+                :disabled="projectReadOnly" data-action="time.setSpeed"
+              >
+                25 Ma/s
+              </button>
+            </Button>
+            <Button variant="outline" size="xs" class="mini-button" as-child>
+              <button
+                id="today-button"
+                type="button"
+                :disabled="projectReadOnly" data-action="time.set"
+              >
+                0
+              </button>
+            </Button>
           </div>
           <div class="playback__row playback__stats">
             <span>Plates <b id="active-plates">—</b></span>
@@ -2887,7 +3154,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <aside id="plate-inspector" class="plate-inspector">
+        <aside id="plate-inspector" class="plate-inspector tm-ui">
           <div id="inspector-empty">Click a feature to inspect</div>
           <div id="inspector-content" hidden>
             <strong id="selected-name">Plate</strong>
@@ -2895,17 +3162,19 @@ onBeforeUnmount(() => {
             <span id="selected-validity">—</span>
             <span id="selected-state">—</span>
             <span id="selected-quaternion">—</span>
-            <button id="clear-feature-selection" type="button" data-action="feature.clear">Clear selection</button>
+            <Button variant="outline" size="xs" class="inspector__clear" as-child>
+              <button id="clear-feature-selection" type="button" data-action="feature.clear">Clear selection</button>
+            </Button>
           </div>
         </aside>
 
-        <div class="map-caption">
+        <div class="map-caption tm-ui">
           <span id="mesh-stat">Waiting for plate mesh</span>
           <span id="plate-model-status" class="plate-model-status"></span>
         </div>
       </main>
 
-      <section class="timeline" aria-label="Geological time scale">
+      <section class="timeline tm-ui" aria-label="Geological time scale">
         <div class="timeline__left-rail">
           <span class="timeline__max">{{ timelineMaximum }}</span>
           <span class="timeline__rail-knob">↔</span>
@@ -2947,15 +3216,21 @@ onBeforeUnmount(() => {
           :disabled="projectReadOnly" data-action="time.set"
         />
         <span class="timeline__zero">0.0</span>
-        <div class="quick-ages" aria-hidden="true">
-          <button type="button" data-age="32" :disabled="projectReadOnly" data-action="time.set">32</button>
-          <button type="button" data-age="250" :disabled="projectReadOnly" data-action="time.set">250</button>
-          <button type="button" :data-age="timelineMaximum" :disabled="projectReadOnly" data-action="time.set">{{ timelineMaximum }}</button>
+        <div class="quick-ages" role="group" aria-label="Quick ages">
+          <Button variant="ghost" size="icon-xs" class="quick-ages__button" as-child>
+            <button type="button" data-age="32" :disabled="projectReadOnly" data-action="time.set">32</button>
+          </Button>
+          <Button variant="ghost" size="icon-xs" class="quick-ages__button" as-child>
+            <button type="button" data-age="250" :disabled="projectReadOnly" data-action="time.set">250</button>
+          </Button>
+          <Button variant="ghost" size="icon-xs" class="quick-ages__button" as-child>
+            <button type="button" :data-age="timelineMaximum" :disabled="projectReadOnly" data-action="time.set">{{ timelineMaximum }}</button>
+          </Button>
         </div>
       </section>
 
       <div id="loading-overlay" class="loading-overlay">
-        <div class="loading-card">
+        <div class="loading-card tm-ui">
           <span class="loading-spinner" aria-hidden="true"></span>
           <p>Preparing reconstruction</p>
           <h2 id="loading-title">Loading PALEOMAP data</h2>
@@ -2964,64 +3239,38 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="toast" :class="{ 'is-visible': toastVisible }" role="status" aria-live="polite">
+      <div class="toast tm-ui" :class="{ 'is-visible': toastVisible }" role="status" aria-live="polite">
         {{ toastMessage }}
       </div>
 
-      <div
-        v-if="authDialogVisible"
-        class="auth-backdrop"
-        role="presentation"
-        @pointerdown.self="authDialogVisible = false"
-      >
-        <section class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-          <button
-            class="auth-dialog__close"
-            type="button"
-            aria-label="Close"
-            data-action="ui.authDialog.close"
-            @click="authDialogVisible = false"
-          >
-            ×
-          </button>
-          <span class="auth-dialog__mark">TM</span>
-          <h2 id="auth-title">Sign in to Time Machine</h2>
-          <p>
-            使用 Server 既有 Unity 账号登录；密码只在本地折算成 Server 约定的摘要，不会保存或记录。
-          </p>
-          <div class="auth-mode-row" role="tablist" aria-label="Sign-in method">
-            <button
-              type="button"
-              role="tab"
-              :aria-selected="authMode === 'account'"
-              :class="{ 'is-active': authMode === 'account' }"
-              data-action="ui.authMode.set"
-              @click="authMode = 'account'"
-            >账号密码</button>
-            <button
-              type="button"
-              role="tab"
-              :aria-selected="authMode === 'email-code'"
-              :class="{ 'is-active': authMode === 'email-code' }"
-              data-action="ui.authMode.set"
-              @click="authMode = 'email-code'"
-            >邮箱验证码</button>
-          </div>
+      <Dialog :open="authDialogVisible" @update:open="setAuthDialogOpen">
+        <DialogContent class="auth-dialog tm-ui" :show-close-button="false">
+          <DialogHeader>
+            <DialogTitle>Sign in to Time Machine</DialogTitle>
+            <DialogDescription>
+              使用 Server 既有 Unity 账号登录；密码只在本地折算成 Server 约定的摘要，不会保存或记录。
+            </DialogDescription>
+          </DialogHeader>
+          <Tabs :model-value="authMode" @update:model-value="setAuthMode">
+            <TabsList class="auth-mode-row" aria-label="Sign-in method">
+              <TabsTrigger value="account" data-action="ui.authMode.set">账号密码</TabsTrigger>
+              <TabsTrigger value="email-code" data-action="ui.authMode.set">邮箱验证码</TabsTrigger>
+            </TabsList>
 
-          <template v-if="authMode === 'account'">
-            <label>
+          <TabsContent value="account" force-mount class="auth-form">
+            <Label class="auth-form__field">
               <span>账号</span>
-              <input
+              <Input
                 v-model.trim="authAccount"
                 type="text"
                 autocomplete="username"
                 placeholder="Unity 账号"
                 data-action="auth.login"
               />
-            </label>
-            <label>
+            </Label>
+            <Label class="auth-form__field">
               <span>密码</span>
-              <input
+              <Input
                 v-model="authPassword"
                 type="password"
                 autocomplete="current-password"
@@ -3029,8 +3278,8 @@ onBeforeUnmount(() => {
                 data-action="auth.login"
                 @keyup.enter="signInWithPassword"
               />
-            </label>
-            <button
+            </Label>
+            <Button
               class="auth-dialog__submit"
               type="button"
               data-testid="password-login"
@@ -3039,39 +3288,40 @@ onBeforeUnmount(() => {
               @click="signInWithPassword"
             >
               {{ authBusy ? "Connecting…" : "Sign in" }}
-            </button>
-          </template>
+            </Button>
+          </TabsContent>
 
-          <template v-else>
-            <label>
+          <TabsContent value="email-code" force-mount class="auth-form">
+            <Label class="auth-form__field">
               <span>Email</span>
-              <input
+              <Input
                 v-model.trim="authEmail"
                 type="email"
                 autocomplete="email"
                 placeholder="you@example.com"
                 data-action="auth.sendCode"
               />
-            </label>
+            </Label>
             <div class="auth-code-row">
-              <label>
+              <Label class="auth-form__field">
                 <span>Verification code</span>
-                <input
+                <Input
                   v-model.trim="authCode"
                   inputmode="numeric"
                   autocomplete="one-time-code"
                   placeholder="6-digit code"
                   data-action="auth.login"
                 />
-              </label>
-              <button
-                type="button"
+              </Label>
+              <Button
+                variant="outline"
+                size="sm"
                 :disabled="authBusy || !authEmail || !phase1B.serverUrl"
                 data-action="auth.sendCode"
                 @click="sendLoginCode"
-              >Send code</button>
+              >Send code</Button>
             </div>
-            <button
+            <Button
               class="auth-dialog__submit"
               type="button"
               :disabled="authBusy || !authEmail || !authCode || !phase1B.serverUrl"
@@ -3079,8 +3329,8 @@ onBeforeUnmount(() => {
               @click="signInWithEmailCode"
             >
               {{ authBusy ? "Connecting…" : "Sign in" }}
-            </button>
-          </template>
+            </Button>
+          </TabsContent>
 
           <p v-if="!phase1B.serverUrl" class="auth-dialog__config">
             {{ phase1B.message || "未配置 Server 地址（VITE_TIMEMACHINE_SERVER_URL）。" }}
@@ -3088,25 +3338,21 @@ onBeforeUnmount(() => {
           <p v-else-if="phase1B.message" class="auth-dialog__config">
             {{ phase1B.message }}
           </p>
-        </section>
-      </div>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" data-action="ui.authDialog.close" @click="setAuthDialogOpen(false)">Cancel</Button>
+          </DialogFooter>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
 
-      <div
-        v-if="uploadDialogVisible"
-        class="auth-backdrop"
-        role="presentation"
-        @pointerdown.self="dismissUploadWizard"
-      >
-        <section class="upload-dialog" role="dialog" aria-modal="true" aria-labelledby="upload-title">
-          <button
-            class="auth-dialog__close"
-            type="button"
-            aria-label="Close"
-            :disabled="uploadBusy"
-            data-action="upload.close"
-            @click="closeUploadWizard"
-          >×</button>
-          <h2 id="upload-title">Upload point dataset</h2>
+      <Dialog :open="uploadDialogVisible" @update:open="handleUploadDialogOpen">
+        <DialogContent class="upload-dialog tm-ui" :show-close-button="false">
+          <DialogHeader>
+            <DialogTitle>Upload point dataset</DialogTitle>
+            <DialogDescription>
+              CSV, TSV and TXT up to 256 MB. Content uploads straight to storage; nothing is read locally after the preview.
+            </DialogDescription>
+          </DialogHeader>
           <ol class="upload-steps" aria-label="Upload steps">
             <li :aria-current="uploadStep === 'select' ? 'step' : undefined">1 · File</li>
             <li :aria-current="uploadStep === 'map' ? 'step' : undefined">2 · Columns</li>
@@ -3224,21 +3470,23 @@ onBeforeUnmount(() => {
               </table>
             </div>
             <div class="upload-actions">
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="sm"
                 :disabled="uploadBusy"
                 data-action="ui.upload.back"
                 @click="showUploadStep('select')"
               >
                 Back
-              </button>
-              <button
+              </Button>
+              <Button
                 class="auth-dialog__submit"
+                size="sm"
                 type="button"
                 :disabled="projectReadOnly || (uploadBusy || ingestPlateModels.length === 0)"
                 data-action="upload.run"
                 @click="startIngest()"
-              >Start ingest</button>
+              >Start ingest</Button>
             </div>
           </template>
 
@@ -3256,125 +3504,231 @@ onBeforeUnmount(() => {
             </div>
             <p aria-live="polite">{{ uploadMessage || "Working…" }}</p>
             <div class="upload-actions">
-              <button
+              <Button
+                variant="destructive"
+                size="sm"
                 type="button"
                 :disabled="!uploadBusy || uploadJobId <= 0"
                 data-action="upload.cancel"
                 @click="cancelIngest"
-              >Cancel job</button>
-              <button
+              >Cancel job</Button>
+              <Button
+                variant="outline"
+                size="sm"
                 type="button"
                 :disabled="uploadBusy"
                 data-action="ui.upload.back"
                 @click="showUploadStep('map')"
               >
                 Back
-              </button>
+              </Button>
             </div>
           </template>
 
           <p v-if="uploadError" class="upload-error" role="alert">{{ uploadError }}</p>
-        </section>
-      </div>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" data-action="upload.close" :disabled="uploadBusy" @click="dismissUploadWizard">Cancel upload</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   </div>
 </template>
 
 <style scoped>
-.project-persistence {
-  position: absolute; top: 48px; right: 12px; z-index: 31;
-  width: min(380px, calc(100% - 278px)); max-height: 44vh; overflow: auto;
-  padding: 8px 10px; border: 1px solid #becbd5; border-radius: 5px;
-  background: #f9fbfd; color: #334854; font-size: 11px; overflow-wrap: anywhere;
+/* Auth and upload dialogs: the shared DialogContent keeps its own fixed,
+   centred box; these two classes only set the workbench width. */
+.auth-dialog {
+  width: min(400px, calc(100vw - 32px));
+  max-width: min(400px, calc(100vw - 32px));
 }
-.project-persistence summary { cursor: pointer; }
-.project-persistence summary span { display: block; margin: 2px 0; }
+.upload-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-width: min(620px, calc(100vw - 32px));
+  max-height: calc(100dvh - 64px);
+  overflow-y: auto;
+}
+
+/* Project status disclosure: native <details>, token skin only.
+   Closed it is a compact one-line status chip parked in the top-bar band (see
+   the placements below), so it never sits on top of the Home button or the
+   module toolbar; expanded it becomes a bounded, scrollable card. */
+.project-persistence {
+  position: absolute; top: 44px; right: 52px; z-index: 31;
+  max-width: min(300px, calc(100% - 64px));
+  color: var(--foreground);
+  font-size: var(--tm-text-meta); line-height: var(--tm-line-meta); overflow-wrap: anywhere;
+}
+.project-persistence > summary {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 100%; min-height: 24px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--popover); box-shadow: 0 1px 4px rgb(16 24 32 / 10%);
+  cursor: pointer; white-space: nowrap;
+}
+.project-persistence > summary:hover { background: var(--muted); }
+.project-persistence > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.project-persistence summary span {
+  display: block; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.project-persistence summary span + span { padding-left: 6px; border-left: 1px solid var(--border); }
+/* Expanded: the chip stays as the card header and the body scrolls. */
+.project-persistence[open] {
+  width: min(380px, calc(100% - 24px)); max-width: none;
+  max-height: 44vh; overflow: auto;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--popover); box-shadow: 0 4px 16px rgb(16 24 32 / 12%);
+}
+.project-persistence[open] > summary {
+  display: flex; max-width: none; min-height: 0; padding: 0 0 6px;
+  border: 0; border-radius: 0; background: none; box-shadow: none;
+}
 .project-persistence p { margin: 7px 0; }
 .project-persistence ul { margin: 6px 0; padding-left: 17px; }
 .project-persistence li { margin: 6px 0; }
-.project-persistence li span { display: block; color: #64727d; }
-.project-persistence [role="alert"], .project-readonly-reason { color: #a22b2b; }
-.project-persistence button { padding: 5px 8px; border: 1px solid #becbd5; border-radius: 3px; background: white; cursor: pointer; }
-.project-review { margin-top: 10px; padding-top: 8px; border-top: 1px solid #becbd5; }
-.project-review h3 { margin: 0; font-size: 12px; }
-.topbar button:disabled { opacity: 0.5; cursor: default; }
-.unsupported-layer-status { white-space: normal; overflow-wrap: anywhere; }
-.layer-swatch.unsupported { background: #a22b2b; border-radius: 0; }
-.layer-group-add,
-.layer-group-controls,
-.point-layer-add {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 5px;
-  padding: 7px;
-  border-bottom: 1px solid #cdd5dc;
-  background: #f5f7f9;
-  font-size: 10px;
+.project-persistence li span { display: block; color: var(--muted-foreground); }
+.project-persistence [role="alert"], .project-readonly-reason { color: var(--destructive); }
+/* Narrow windows: below the 73px module toolbar (which ends at 122px from the
+   window top) and clear of the Home button, which is above it. */
+@media (max-width: 1180px) {
+  .project-persistence { top: 126px; right: 12px; max-width: min(320px, calc(100% - 510px)); }
 }
+/* Phone widths: the left column of map overlays reaches x≈242, so the chip
+   keeps to the free right-hand strip and shows the local state only (the
+   cloud state stays in the DOM and the expanded card). */
+@media (max-width: 740px) {
+  .project-persistence { max-width: calc(100% - 262px); }
+  .project-persistence summary span[data-testid="cloud-save-status"] {
+    position: absolute; width: 1px; height: 1px; margin: -1px;
+    padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+  }
+}
+.project-review { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.project-review h3 { margin: 0; font-size: var(--tm-text-label); }
 
-.layer-group-add > label:first-child { grid-column: 1 / -1; }
-.layer-group-add label,
-.layer-group-controls label,
-.point-layer-add label { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.layer-group-add input,
-.layer-group-add select,
-.layer-group-controls select,
-.point-layer-add input,
-.point-layer-add select { flex: 1; min-width: 0; width: 0; }
-.layer-group-add input,
-.layer-group-add select,
-.layer-group-add button,
-.layer-group-controls select,
-.layer-group-controls button,
-.point-layer-add input,
-.point-layer-add select,
-.point-layer-add button {
-  min-height: 26px;
-  border: 1px solid #becbd5;
-  border-radius: 3px;
-  background: white;
-  color: #334854;
-  font: inherit;
-}
-.layer-group-add button,
-.layer-group-controls button,
-.point-layer-add button { padding: 3px 6px; cursor: pointer; }
-.layer-group-add button:disabled,
-.layer-group-controls button:disabled,
-.point-layer-add button:disabled { cursor: default; color: #697782; background: #edf1f4; }
-.layer-group-controls small { grid-column: 1 / -1; color: #64727d; font-size: 9px; }
-.layer-group-error { margin: 0; padding: 8px; color: #a22b2b; font-size: 11px; overflow-wrap: anywhere; }
-.point-layer-add label,
-.point-layer-add small { grid-column: 1 / -1; }
-.point-layer-add button { grid-column: 2; }
-.point-layer-add small { color: #64727d; }
-.atlas-layer-add > p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+/* Account menu content (DropdownMenu portals to the body). */
+.account-menu__identity { display: grid; gap: 1px; }
+.account-menu__identity strong { font-size: var(--tm-text-label); }
+.account-menu__identity small { font-size: var(--tm-text-meta); color: var(--muted-foreground); }
+
+/* Layer rows and inline controls. */
+.unsupported-layer-status { white-space: normal; overflow-wrap: anywhere; }
+.layer-swatch.unsupported { background: var(--destructive); border-radius: 0; }
+.layer-swatch.lines { height: 3px; border-radius: 0; background: #38bdf8; }
+.layer-swatch.polygons { border-radius: 1px; border: 1px solid #ffffff; background: #38bdf8; }
 .layer-copy .ordinary-atlas-status { white-space: normal; overflow-wrap: anywhere; }
+.layer-group-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 10px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  font-size: var(--tm-text-meta);
+}
+.layer-group-controls label { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.layer-group-controls small { flex: 1 0 100%; color: var(--muted-foreground); font-size: var(--tm-text-meta); }
+.sidebar-add { padding: 6px 10px; }
+.sidebar-add__trigger { width: 100%; }
 .layer-row > .layer-retry {
   grid-column: 3 / -1;
   justify-self: start;
   width: auto;
   max-width: 100%;
   height: auto;
-  padding: 4px 6px;
-  border: 1px solid #becbd5;
-  border-radius: 3px;
-  background: white;
-  color: #334854;
   overflow-wrap: anywhere;
   text-align: left;
 }
-.layer-row > .layer-retry:disabled { opacity: 0.5; cursor: default; }
+.ordinary-point-error { display: block; color: var(--destructive); overflow-wrap: anywhere; white-space: normal; }
 .point-layer-action-message,
-.point-layer-action-error { margin: 0; padding: 8px; font-size: 11px; overflow-wrap: anywhere; }
 .point-layer-action-error,
-.ordinary-point-error { color: #a22b2b; }
-.ordinary-point-error { display: block; overflow-wrap: anywhere; white-space: normal; }
+.layer-group-error {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: var(--tm-text-meta);
+  line-height: var(--tm-line-meta);
+  overflow-wrap: anywhere;
+}
+.point-layer-action-error,
+.layer-group-error { color: var(--destructive); }
 .ordinary-point-style-controls { grid-column: 1 / -1; display: grid; gap: 6px; }
 .ordinary-point-style-controls label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.ordinary-point-style-controls input[type="number"] { width: 64px; }
+.ordinary-point-style-controls input[type="number"] { width: 68px; }
 .ordinary-raster-controls select { flex: 1; min-width: 0; max-width: 100%; }
-.ordinary-point-style-error { margin: 0; color: #a22b2b; overflow-wrap: anywhere; }
-.layer-swatch.lines { height: 3px; border-radius: 0; background: #38bdf8; }
-.layer-swatch.polygons { border-radius: 1px; border: 1px solid #ffffff; background: #38bdf8; }
+.ordinary-point-style-error { margin: 0; color: var(--destructive); overflow-wrap: anywhere; }
+.catalog-separator { margin: 0 0 4px; }
+
+/* Auth dialog form. */
+.auth-form { display: grid; gap: 10px; }
+.auth-form__field { display: grid; gap: 4px; align-items: start; }
+.auth-form__field > span { font-size: var(--tm-text-meta); color: var(--muted-foreground); }
+.auth-code-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.auth-dialog__config {
+  margin: 0;
+  font-size: var(--tm-text-meta);
+  line-height: var(--tm-line-meta);
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+/* Upload wizard. */
+.upload-steps { display: flex; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.upload-steps li {
+  flex: 1;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--tm-text-meta);
+  text-align: center;
+}
+.upload-steps li[aria-current="step"] {
+  border-color: var(--primary);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font-weight: 600;
+}
+.upload-file-line { display: flex; gap: 8px; align-items: baseline; margin: 0; }
+.upload-file-line strong { font-size: var(--tm-text-label); }
+.upload-file-line small { color: var(--muted-foreground); font-size: var(--tm-text-meta); }
+.upload-mapping { display: grid; gap: 6px; }
+.upload-mapping label { display: grid; gap: 3px; }
+.upload-mapping label > span { font-size: var(--tm-text-meta); color: var(--muted-foreground); }
+.upload-mapping label em { color: var(--destructive); font-style: normal; }
+.upload-preview {
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+.upload-preview table { width: 100%; border-collapse: collapse; font-size: var(--tm-text-meta); }
+.upload-preview caption { padding: 4px 6px; color: var(--muted-foreground); text-align: left; }
+.upload-preview th, .upload-preview td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+.upload-preview th { position: sticky; top: 0; background: var(--muted); font-weight: 600; }
+.upload-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.upload-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.upload-progress > span { display: block; height: 100%; background: var(--primary); transition: width 120ms linear; }
+.upload-error {
+  margin: 0;
+  font-size: var(--tm-text-meta);
+  line-height: var(--tm-line-meta);
+  color: var(--destructive);
+  overflow-wrap: anywhere;
+}
+@media (prefers-reduced-motion: reduce) {
+  .upload-progress > span { transition: none; }
+}
 </style>

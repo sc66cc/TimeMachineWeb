@@ -16,6 +16,11 @@ function cameraState(viewer: Viewer): number[] {
   return state;
 }
 
+/** The pose part (position/direction/up) must be complete before completion. */
+function poseIsFinite(state: number[]): boolean {
+  return state.slice(0, 9).every(value => Number.isFinite(value));
+}
+
 function sameCamera(a: number[], b: number[]): boolean {
   return a.every((value, i) => Object.is(value, b[i]) || Math.abs(value - b[i]!) <= 1e-12 * Math.max(1, Math.abs(value)));
 }
@@ -66,7 +71,13 @@ export class CameraResetCompletion {
       const abort = () => stop(new OperationInterruptedError("cancelled"));
       const timer = setTimeout(() => stop(new Error("Camera reset did not render within 30 seconds.")), 30_000);
       removeFrame = scene.postRender.addEventListener(() => {
-        if (flightComplete && targetCamera) finish(sameCamera(targetCamera, cameraState(this.viewer)) ? undefined
+        if (!flightComplete || !targetCamera) return;
+        const rendered = cameraState(this.viewer);
+        if (!poseIsFinite(rendered)) {
+          finish(new Error("The camera pose is not finite after the reset frame."));
+          return;
+        }
+        finish(sameCamera(targetCamera, rendered) ? undefined
           : new OperationInterruptedError("superseded", "Another camera change replaced the reset before it rendered."));
       });
       removeError = scene.renderError.addEventListener((_scene, error) => stop(
@@ -81,6 +92,12 @@ export class CameraResetCompletion {
             flightActive = false;
             flightComplete = true;
             targetCamera = cameraState(this.viewer);
+            // Never turn a NaN target into a "successful" reset: Object.is(NaN,
+            // NaN) would otherwise match on the next frame.
+            if (!poseIsFinite(targetCamera)) {
+              finish(new Error("Camera reset completed on a non-finite camera pose."));
+              return;
+            }
             scene.requestRender();
           },
           cancel: () => {

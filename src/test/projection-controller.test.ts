@@ -44,6 +44,7 @@ interface FakeScene {
   };
   isDestroyed: () => boolean;
   listenerCount: () => number;
+  lifecycleListenerCount: () => number;
   firePostRender: () => void;
   fireRenderError: (error: unknown) => void;
 }
@@ -51,6 +52,10 @@ interface FakeScene {
 function createFakeScene(): FakeScene {
   const listeners = new Set<() => void>();
   const errorListeners = new Set<(scene: unknown, error: unknown) => void>();
+  // The controller installs exactly one lifecycle renderError listener in its
+  // constructor. listenerCount() keeps its original meaning (in-flight
+  // transaction listeners) so the existing leak assertions stay honest.
+  let lifecycleListener: ((scene: unknown, error: unknown) => void) | undefined;
   const scene: FakeScene = {
     mode: "SCENE3D",
     morphTo2D: vi.fn(() => {
@@ -70,6 +75,7 @@ function createFakeScene(): FakeScene {
     },
     renderError: {
       addEventListener: (fn: (scene: unknown, error: unknown) => void) => {
+        lifecycleListener ??= fn;
         errorListeners.add(fn);
         return () => {
           errorListeners.delete(fn);
@@ -77,7 +83,10 @@ function createFakeScene(): FakeScene {
       },
     },
     isDestroyed: () => false,
-    listenerCount: () => listeners.size + errorListeners.size,
+    listenerCount: () =>
+      listeners.size + errorListeners.size - (lifecycleListener && errorListeners.has(lifecycleListener) ? 1 : 0),
+    lifecycleListenerCount: () =>
+      lifecycleListener && errorListeners.has(lifecycleListener) ? 1 : 0,
     firePostRender: () => {
       for (const fn of [...listeners]) {
         fn();
@@ -1316,7 +1325,20 @@ describe("ProjectionController Moll worker pipeline", () => {
     h.scene.fireRenderError(new Error("late old error"));
     cpu.resolve(HANDLE);
     await flush();
-    expect(h.snapshot()).toEqual(before);
+    if (boundary === "mode") {
+      // The old request still cannot install anything, but a scene error raised
+      // with no owning transaction is now an honest lifecycle error.
+      expect(h.snapshot()).toMatchObject({
+        committedId: before.committedId,
+        committedTimeMa: before.committedTimeMa,
+        requestedTimeMa: before.requestedTimeMa,
+        revision: before.revision,
+        status: "error",
+      });
+      expect(h.snapshot().lastError?.message).toBe("late old error");
+    } else {
+      expect(h.snapshot()).toEqual(before);
+    }
     expect(h.renderer.stageRectangleFrame).toHaveBeenCalledTimes(stages);
   });
 
@@ -2625,5 +2647,40 @@ describe("ProjectionController", () => {
     expect(h.renderer.prepareRectangleFrame).not.toHaveBeenCalled();
     expect(h.renderer.commitRectangleFrame).not.toHaveBeenCalled();
     expect(h.scene.morphTo3D).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProjectionController lifecycle render errors", () => {
+  it("surfaces an idle render failure and clears it only after an explicit recovered render", () => {
+    const h = createHarness();
+    h.scene.fireRenderError(new Error("idle native frame failed"));
+    expect(h.snapshot()).toMatchObject({
+      status: "error",
+      lastError: { message: "idle native frame failed" },
+    });
+    // No transaction owns this error, so no later frame may clear it silently.
+    h.scene.firePostRender();
+    expect(h.snapshot().status).toBe("error");
+    h.controller.confirmRenderRecovered();
+    expect(h.snapshot()).toMatchObject({ status: "ready", lastError: undefined });
+  });
+
+  it("keeps a different failure when an explicit recovery completes", () => {
+    const h = createHarness();
+    h.scene.fireRenderError(new Error("idle native frame failed"));
+    h.controller.invalidateSource();
+    expect(h.snapshot().lastError?.kind).toBe("busy");
+    h.controller.confirmRenderRecovered();
+    expect(h.snapshot().status).toBe("error");
+    expect(h.snapshot().lastError?.kind).toBe("busy");
+  });
+
+  it("detaches the lifecycle listener on destroy and ignores later errors", () => {
+    const h = createHarness();
+    expect(h.scene.lifecycleListenerCount()).toBe(1);
+    h.controller.destroy();
+    expect(h.scene.lifecycleListenerCount()).toBe(0);
+    h.scene.fireRenderError(new Error("late"));
+    expect(h.snapshot().status).not.toBe("error");
   });
 });

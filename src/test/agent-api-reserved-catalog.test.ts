@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const SHELL_UI_ACTIONS = [
+  "ui.addPanel.setVisible",
+  "ui.console.clear",
+  "ui.console.selectOutput",
+  "ui.console.setVisible",
+  "ui.sidebar.setVisible",
+  "ui.welcome.setVisible",
+] as const;
+
 const services = [
   "service.TimeMachinePlatform.GetCapabilities",
   "service.UserPlateModel.Display",
@@ -42,7 +51,10 @@ describe("reserved service and selection contracts", () => {
     }
     expect(api().catalog.list({ kind: "service", idPrefix: "service." }).map(row => row.id)).toEqual(services);
     const actions = target.timeMachineAgent!.listActions();
-    expect(actions).toHaveLength(64);
+    expect(actions).toHaveLength(70);
+    // The six shell controls were added; the original 64 stay complete.
+    expect(actions.filter(row => !(SHELL_UI_ACTIONS as readonly string[]).includes(row.id))).toHaveLength(64);
+    for (const id of SHELL_UI_ACTIONS) expect(actions.some(row => row.id === id), id).toBe(true);
     expect(actions.filter(row => reserved.includes(row.id)).map(row => row.id)).toEqual(["feature.clear", "feature.select"]);
     for (const id of declaredSelectionCommands) {
       expect(actions.find(row => row.id === id), id).toMatchObject({ id, status: "unsupported" });

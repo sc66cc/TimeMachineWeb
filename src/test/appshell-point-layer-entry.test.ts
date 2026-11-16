@@ -10,6 +10,7 @@ import { LAYER_STATE_EVENT, LAYER_VISIBILITY_CHANGE_EVENT, LAYER_OPACITY_CHANGE_
 import { ProjectSession, RUNTIME_LAYER_IDS } from "../project/project-session";
 import type { Phase1BState } from "../phase1b/cloud-client";
 import { mountAppShell } from "./support/mount-app-shell";
+import { openAddLayerPanel } from "./support/add-layer-panel";
 
 const fixture = vi.hoisted(() => ({ state: undefined as Phase1BState | undefined }));
 vi.mock("../phase1b/cloud-client", async importOriginal => ({
@@ -99,7 +100,7 @@ function point(name: string): number {
   return session.addLayer({ name, type: ProjectLayerType.Point, sourceRef: "fixture:goal-points-v1", groupId: 101, active: true, alpha: 1 });
 }
 function row(id: number): HTMLElement { return element(`.layer-row[data-layer-id="${id}"]`); }
-async function mount(): Promise<void> { mounted = await mountAppShell(); publish(); await nextTick(); }
+async function mount(): Promise<void> { mounted = await mountAppShell(); publish(); await nextTick(); await openAddLayerPanel("point"); await nextTick(); }
 function field(selector: string, value: string, event = "input"): void {
   const node = element<HTMLInputElement | HTMLSelectElement>(selector);
   node.value = value; node.dispatchEvent(new Event(event, { bubbles: true }));

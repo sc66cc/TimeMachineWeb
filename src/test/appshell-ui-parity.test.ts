@@ -66,10 +66,11 @@ function element<T extends HTMLElement>(selector: string): T {
   return found;
 }
 
-function input(selector: string, value: string): void {
+function input(selector: string, value: string): HTMLInputElement {
   const field = element<HTMLInputElement>(selector);
   field.value = value;
   field.dispatchEvent(new Event("input", { bubbles: true }));
+  return field;
 }
 
 function deferred<T>() {
@@ -109,14 +110,25 @@ describe("AppShell UI/API business parity", () => {
       await nextTick();
       const secretSelector = mode === "account" ? '[autocomplete="current-password"]' : '[autocomplete="one-time-code"]';
       input(mode === "account" ? '[autocomplete="username"]' : '[autocomplete="email"]', "fixture@example.test");
-      input(secretSelector, "synthetic-private-input");
+      const secretField = input(secretSelector, "synthetic-private-input");
       await nextTick();
       const params = mode === "account"
         ? { mode, account: "fixture-account", password: "synthetic-private-input" }
         : { mode, email: "fixture@example.test", code: "synthetic-private-input" };
       const operation = entry === "api" ? agentActions.execute(AGENT_ACTIONS.authLogin, params) : undefined;
-      if (entry === "ui") element<HTMLButtonElement>('.auth-dialog__submit').click();
+      if (entry === "ui") {
+        // Both tabs are force-mounted; pick the submit control of the active
+        // mode, not the first `.auth-dialog__submit` in document order.
+        const tab = element<HTMLElement>(secretSelector).closest<HTMLElement>('[data-slot="tabs-content"]');
+        const submit = tab?.querySelector<HTMLButtonElement>('.auth-dialog__submit') ?? null;
+        expect(submit, `${mode} submit`).not.toBeNull();
+        submit!.click();
+      }
       await nextTick();
+      const expectedClient = mode === "account" ? fixtures.loginWithPassword : fixtures.login;
+      const otherClient = mode === "account" ? fixtures.login : fixtures.loginWithPassword;
+      expect(expectedClient).toHaveBeenCalledOnce();
+      expect(otherClient).not.toHaveBeenCalled();
       const during = ui();
       pending.reject(new Error("Synthetic login refused: synthetic-private-input"));
       if (operation) {
@@ -128,6 +140,7 @@ describe("AppShell UI/API business parity", () => {
       expect(during.busy).toBe(true);
       expect(ui()).toMatchObject({ busy: false, authDialogOpen: true });
       expect(element<HTMLInputElement>(secretSelector).value).toBe("");
+      expect(secretField.value).toBe("");
       expect(document.body.textContent).not.toContain("synthetic-private-input");
       expect(JSON.stringify(agentActions.getState())).not.toContain("synthetic-private-input");
     } finally { mounted.unmount(); }
@@ -238,7 +251,13 @@ describe("AppShell UI/API business parity", () => {
       await settle();
       expect(before).toMatchObject({ uploadStep: "run", uploadProgress: 0.4, uploadStage: "processing", uploadJobId: 12, busy: true });
       expect(back).toMatchObject({ ok: false, error: { kind: "busy" } });
-      expect(after).toEqual(before);
+      // `toastVisible` is the one intentional difference: the refused
+      // `upload.open` click surfaces an explicit toast instead of silently
+      // doing nothing. Every other business field must be byte-identical.
+      expect(after).toEqual({ ...before, toastVisible: true });
+      const toast = element<HTMLElement>(".toast");
+      expect(toast.classList.contains("is-visible")).toBe(true);
+      expect(toast.textContent).toContain("An ingest job is already running.");
       expect(ui()).toMatchObject({ busy: false, uploadError: "Synthetic upload refused token=[redacted]" });
       expect(JSON.stringify(agentActions.getState())).not.toMatch(/synthetic-private-(?:file-body|token)/);
     } finally { mounted.unmount(); }

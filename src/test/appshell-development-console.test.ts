@@ -45,6 +45,7 @@ describe("AppShell development console", () => {
     expect(output()).toBe(savedOutput); expect(document.getElementById("timeline-slider")).toBe(nativeTimeline);
     element<HTMLButtonElement>('[data-ui-local="console.selectOutput"]').click();
     const textarea = element<HTMLTextAreaElement>('[aria-label="Console output"]');
+    expect(document.activeElement).toBe(textarea);
     expect(textarea.selectionStart).toBe(0); expect(textarea.selectionEnd).toBe(textarea.value.length);
     expect([...element<HTMLElement>('[data-testid="development-console"]').querySelectorAll("button")].every(button => button.hasAttribute("data-ui-local") && !button.hasAttribute("data-action"))).toBe(true);
   });
@@ -79,6 +80,116 @@ describe("AppShell development console", () => {
     expect(output()).toContain("Invalid JSON");
     expect(element<HTMLElement>('[data-testid="console-history-status"]').textContent).toContain("47 entries");
     element<HTMLButtonElement>('[data-ui-local="console.clear"]').click(); await nextTick(); expect(output()).toBe("");
+  });
+
+  it("executes a command entered in the same tick and in a later tick", async () => {
+    await mount();
+    const inputElement = element<HTMLInputElement>('[aria-label="Console command"]');
+    // Same tick: input -> keydown Enter before Vue can flush anything.
+    inputElement.value = "help";
+    inputElement.dispatchEvent(new Event("input", { bubbles: true }));
+    inputElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(output().match(/> help/g)).toHaveLength(1);
+    expect(inputElement.value).toBe("");
+    // Later tick: the same command after an explicit flush.
+    inputElement.value = "help";
+    inputElement.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    expect(inputElement.value).toBe("help");
+    inputElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(output().match(/> help/g)).toHaveLength(2);
+    expect(inputElement.value).toBe("");
+  });
+
+  it("fails selectOutput honestly when closed or empty and focuses the real textarea otherwise", async () => {
+    await mount();
+    const api = window.timeMachineAgent!.v2;
+    // Open, but nothing retained yet.
+    expect(await api.execute("ui.console.selectOutput", {})).toMatchObject({
+      ok: false, error: { kind: "validation" },
+    });
+    await enter("help");
+    element<HTMLButtonElement>('[data-ui-local="console.toggle"]').click(); await nextTick();
+    // Closed with retained output: still a failure, never a fake success.
+    expect(await api.execute("ui.console.selectOutput", {})).toMatchObject({
+      ok: false, error: { kind: "validation" },
+    });
+    element<HTMLButtonElement>('[data-ui-local="console.toggle"]').click(); await settle();
+    const selected = await api.execute("ui.console.selectOutput", {});
+    expect(selected).toMatchObject({ ok: true, data: { selected: true } });
+    const textarea = element<HTMLTextAreaElement>('[aria-label="Console output"]');
+    expect(document.activeElement).toBe(textarea);
+    expect(textarea.selectionStart).toBe(0);
+    expect(textarea.selectionEnd).toBe(textarea.value.length);
+    expect(textarea.value.length).toBeGreaterThan(0);
+  });
+
+  it("clears retained output without cancelling the running job", async () => {
+    await mount();
+    agentActions.register(AGENT_DECLARATIONS[AGENT_ACTIONS.timeSet], (_params, context) => new Promise((_resolve, reject) => {
+      context!.signal!.addEventListener("abort", () => reject(new OperationInterruptedError("cancelled")), { once: true });
+    }));
+    await enter('time.set {"ageMa":110}');
+    await vi.waitFor(() => expect(output()).toContain('"status": "accepted"'));
+    const jobId = output().match(/"jobId": "([^"]+)"/)![1]!;
+    element<HTMLButtonElement>('[data-ui-local="console.clear"]').click(); await nextTick();
+    expect(output()).toBe("");
+    expect(agentActions.getState().ui).toMatchObject({ consoleEntryCount: 0, consolePendingCount: 0 });
+    const api = window.timeMachineAgent!.v2;
+    expect(await api.jobs.get(jobId)).toMatchObject({ jobId, status: "running" });
+    await api.jobs.cancel(jobId);
+    expect(await api.jobs.wait(jobId)).toMatchObject({ ok: false, status: "cancelled" });
+  });
+
+  it("moves focus to the command input after Clear and closes with Escape from there", async () => {
+    await mount();
+    const input = element<HTMLInputElement>('[aria-label="Console command"]');
+    await enter("help");
+    // Clear disables its own button; focus must land on the real command input,
+    // not on <body>, or the panel-scoped Escape listener never fires.
+    element<HTMLButtonElement>('[data-ui-local="console.clear"]').click(); await settle();
+    expect(output()).toBe("");
+    expect(document.activeElement).toBe(input);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+    expect(element<HTMLElement>('[aria-label="Development console"]').style.display).toBe("none");
+    expect(element<HTMLElement>('[data-ui-local="console.toggle"].console-toggle')).toBe(document.activeElement);
+  });
+
+  it("clears through the API without opening the panel or stealing focus when closed", async () => {
+    await mount();
+    await enter("help");
+    element<HTMLButtonElement>('[data-ui-local="console.toggle"]').click(); await settle();
+    expect(element<HTMLElement>('[aria-label="Development console"]').style.display).toBe("none");
+    // Closing returns focus to the visible toggle; a closed-panel clear must leave it there.
+    const toggle = element<HTMLElement>('[data-ui-local="console.toggle"].console-toggle');
+    expect(document.activeElement).toBe(toggle);
+    const api = window.timeMachineAgent!.v2;
+    expect(await api.execute("ui.console.clear", {})).toMatchObject({ ok: true, data: { entries: 0 } });
+    await settle();
+    expect(element<HTMLElement>('[aria-label="Development console"]').style.display).toBe("none");
+    expect(document.activeElement).toBe(toggle);
+    expect(document.activeElement).not.toBe(element('[aria-label="Console command"]'));
+  });
+
+  it("keeps a pending job running across Clear and the Escape close", async () => {
+    await mount();
+    agentActions.register(AGENT_DECLARATIONS[AGENT_ACTIONS.timeSet], (_params, context) => new Promise((_resolve, reject) => {
+      context!.signal!.addEventListener("abort", () => reject(new OperationInterruptedError("cancelled")), { once: true });
+    }));
+    await enter('time.set {"ageMa":110}');
+    await vi.waitFor(() => expect(output()).toContain('"status": "accepted"'));
+    const jobId = output().match(/"jobId": "([^"]+)"/)![1]!;
+    element<HTMLButtonElement>('[data-ui-local="console.clear"]').click(); await settle();
+    expect(output()).toBe("");
+    const api = window.timeMachineAgent!.v2;
+    expect(await api.jobs.get(jobId)).toMatchObject({ jobId, status: "running" });
+    element<HTMLInputElement>('[aria-label="Console command"]')
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+    expect(await api.jobs.get(jobId)).toMatchObject({ jobId, status: "running" });
+    await api.jobs.cancel(jobId);
+    expect(await api.jobs.wait(jobId)).toMatchObject({ ok: false, status: "cancelled" });
   });
 
   it("shows API startup absence without pretending execution succeeded", async () => {

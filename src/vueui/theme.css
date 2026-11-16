@@ -1,0 +1,202 @@
+/*
+ * TimeMachine Web — Vue workbench theme (Tailwind v4, no preflight).
+ *
+ * Deliberately omits Tailwind's preflight: this document also hosts the Cesium
+ * canvas, whose widget CSS must not be reset. Only the `theme` and `utilities`
+ * layers are imported, and the few element-level rules below are scoped to
+ * `.tm-ui`, which is only applied to workbench *chrome* roots (top bar, sidebar,
+ * timeline, module toolbar, playback, inspector, loading card, toast, dialogs,
+ * console, welcome panel) — never to `.viewport`/`.workspace`, so Cesium keeps
+ * its own box model, cursors and SVG layout.
+ *
+ * Imported once from `src/main.ts`, after `src/style.css`.
+ */
+
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * State variants used by the copied registry components. The shadcn-vue CSS
+ * entry normally declares these; this project's theme is hand-built, so they
+ * are declared here instead. Without them `data-open:`/`data-active:` etc.
+ * compile to nothing and tabs, dialogs and menus lose their state styling.
+ *
+ * `data-closed` is deliberately NOT declared: `tw-animate-css` exit animations
+ * leave a closed reka-ui Presence portal mounted (verified in the real browser:
+ * the closed dialog content kept covering the page). Enter transitions and all
+ * other state variants stay; closing unmounts immediately, which also matches
+ * the restrained-motion direction of this workbench.
+ */
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-active (&[data-state="active"]);
+@custom-variant data-disabled (&[data-disabled], &[data-disabled="true"]);
+@custom-variant data-horizontal (&[data-orientation="horizontal"]);
+@custom-variant data-vertical (&[data-orientation="vertical"]);
+@custom-variant data-inset (&[data-inset="true"]);
+@custom-variant data-checked (&[data-state="checked"]);
+@custom-variant data-unchecked (&[data-state="unchecked"]);
+@custom-variant data-highlighted (&[data-highlighted]);
+@custom-variant data-placeholder (&[data-placeholder]);
+
+:root {
+  /* Surfaces and text (compact blue-grey workbench) */
+  --background: #f7f9fc;
+  --foreground: #101820;
+  --card: #ffffff;
+  --card-foreground: #101820;
+  --popover: #ffffff;
+  --popover-foreground: #101820;
+  --muted: #eef2f7;
+  --muted-foreground: #52606d;
+  --accent: #e6f0fb;
+  --accent-foreground: #123f68;
+  --primary: #1f6fd0;
+  --primary-foreground: #ffffff;
+  --secondary: #e8edf4;
+  --secondary-foreground: #1b2b3a;
+  --destructive: #b3261e;
+  --destructive-foreground: #ffffff;
+  --border: #d2dbe4;
+  /* UI control boundary: 3.66:1 on #ffffff, 3.47:1 on #f7f9fc, 3.26:1 on
+     #eef2f7, so an input edge clears the 3:1 non-text requirement on every
+     light surface the shell uses. Science band colours live in data, not here. */
+  --input: #7a8796;
+  --ring: #2a82e4;
+
+  /* Sidebar and top bar */
+  --sidebar: #eef2f7;
+  --sidebar-foreground: #17222e;
+  --sidebar-primary: #1f6fd0;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #dfe9f5;
+  --sidebar-accent-foreground: #123f68;
+  --sidebar-border: #c7d2de;
+  --sidebar-ring: #2a82e4;
+
+  /* Charts keep the geological colour language; never used for the map. */
+  --chart-1: #1f6fd0;
+  --chart-2: #4fae9e;
+  --chart-3: #9666bb;
+  --chart-4: #d8bc77;
+  --chart-5: #77bf73;
+
+  --radius: 6px;
+
+  /* Workbench type scale: 13px body, 12px label, 11px meta. */
+  --tm-text-body: 13px;
+  --tm-text-label: 12px;
+  --tm-text-meta: 11px;
+  --tm-line-body: 20px;
+  --tm-line-meta: 16px;
+  --tm-control-height: 28px;
+  --tm-control-height-lg: 32px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+
+  --text-tm-body: var(--tm-text-body);
+  --text-tm-label: var(--tm-text-label);
+  --text-tm-meta: var(--tm-text-meta);
+}
+
+/*
+ * Minimal, scoped base. No `*` reset, no `border-style` reload, no `body`
+ * font rewrite: those would reach Cesium. Only the font *family* is inherited
+ * by native controls that carry `.tm-ui`, so their own size/weight utilities
+ * and the workbench type scale still apply.
+ */
+.tm-ui :is(button, input, select, textarea) {
+  font-family: inherit;
+}
+
+.tm-ui :is(button, [role="button"]):not(:disabled):not([aria-disabled="true"]):not([data-slot="dropdown-menu-item"]):not([data-slot="dropdown-menu-checkbox-item"]):not([data-slot="dropdown-menu-radio-item"]) {
+  cursor: pointer;
+}
+
+/* Keyboard focus is always visible; mouse focus does not draw the ring. */
+.tm-ui :focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/*
+ * reka-ui hides inactive panels with the `hidden` attribute, but a
+ * `force-mount` panel only gets `data-state="inactive"` (verified in the real
+ * browser). Both forms are covered so a tab never shows two panels at once.
+ * Hidden panels stay mounted, so their draft values survive a tab switch.
+ */
+.tm-ui [data-slot="tabs-content"][data-state="inactive"],
+.tm-ui [data-slot="tabs-content"][hidden],
+.tm-ui [data-slot="dialog-content"][hidden] {
+  display: none;
+}
+
+/*
+ * Overlay order. The workbench toast (80) and the development console (70) are
+ * chrome; a portalled dialog and its own popper content must sit above both so
+ * a dialog is never covered, and a dialog never loses its own tooltip.
+ */
+[data-slot="dialog-overlay"] {
+  z-index: 88;
+}
+
+[data-slot="dialog-content"] {
+  z-index: 89;
+}
+
+[data-reka-popper-content-wrapper] {
+  z-index: 90;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tm-ui *,
+  .tm-ui *::before,
+  .tm-ui *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

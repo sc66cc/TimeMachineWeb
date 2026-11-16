@@ -11,6 +11,7 @@ import { registerLayerStyleAction } from "../layers/style-action";
 import { ProjectSession } from "../project/project-session";
 import type { Phase1BState } from "../phase1b/cloud-client";
 import { mountAppShell } from "./support/mount-app-shell";
+import { openAddLayerPanel } from "./support/add-layer-panel";
 
 const fixture = vi.hoisted(() => ({ state: undefined as Phase1BState | undefined }));
 vi.mock("../phase1b/cloud-client", async importOriginal => ({
@@ -62,7 +63,7 @@ function add(name: string): number {
 function element<T extends HTMLElement = HTMLElement>(selector: string): T {
   const node = document.querySelector<T>(selector); if (!node) throw new Error(`Missing ordinary line UI: ${selector}`); return node;
 }
-async function mount(): Promise<void> { mounted = await mountAppShell(); publish(); await nextTick(); }
+async function mount(): Promise<void> { mounted = await mountAppShell(); publish(); await nextTick(); await openAddLayerPanel("line"); await nextTick(); }
 async function settle(): Promise<void> { await Promise.resolve(); await nextTick(); await new Promise(resolve => setTimeout(resolve, 0)); }
 async function field(selector: string, value: string, event = "change"): Promise<void> {
   const input = element<HTMLInputElement>(selector); input.value = value; input.dispatchEvent(new Event(event, { bubbles: true })); await settle();
@@ -72,7 +73,7 @@ describe("ordinary line controls", () => {
   it("adds and removes a line through shared actions and keeps Point/GPU controls intact", async () => {
     await mount();
     expect(document.querySelector('form[aria-label="Add line layer"]')).not.toBeNull();
-    const pointForm = element('form[aria-label="Add point layer"]'); const gpu = element<HTMLButtonElement>("#load-points");
+    const gpu = element<HTMLButtonElement>("#load-points");
     gpu.disabled = false; const clicked = vi.fn(); gpu.addEventListener("click", clicked);
     const source = element<HTMLSelectElement>('[aria-label="Line layer source"]');
     expect([...source.options].map(option => ({ value: option.value, text: option.text }))).toEqual([{ value: "fixture:goal-lines-v1", text: "Synthetic line sample" }]);
@@ -93,7 +94,9 @@ describe("ordinary line controls", () => {
     expect(element(`[data-layer-id="${first.id}"] .ordinary-line-status`).textContent).toContain("removing");
     finishRemove!(); await settle();
     expect(session.getLayer(first.id)).toBeUndefined(); expect(session.getLayer(second)).toBeDefined();
-    expect(element('form[aria-label="Add point layer"]')).toBe(pointForm); expect(element("#load-points")).toBe(gpu);
+    // The inactive point form is UI-owned and may be unmounted; the main-captured
+    // GPU node may not change.
+    expect(element("#load-points")).toBe(gpu);
     gpu.click(); expect(clicked).toHaveBeenCalledOnce();
     expect(document.querySelectorAll(".point-style-controls")).toHaveLength(1);
     expect(document.querySelectorAll(".point-performance-lab")).toHaveLength(1);

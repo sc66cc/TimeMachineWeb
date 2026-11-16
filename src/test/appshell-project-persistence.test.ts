@@ -9,6 +9,7 @@ import { PROJECT_STATE_EVENT, type ProjectCloudSaveState, type ProjectStateDetai
 import { LAYER_STATE_EVENT, type LayerStateDetail } from "../layers/layer-events";
 import type { Phase1BState } from "../phase1b/cloud-client";
 import { mountAppShell } from "./support/mount-app-shell";
+import { openAddLayerPanel } from "./support/add-layer-panel";
 
 const fixture = vi.hoisted(() => ({ state: undefined as Phase1BState | undefined, referenceFails: false }));
 vi.mock("../phase1b/cloud-client", async importOriginal => ({
@@ -79,6 +80,27 @@ describe("AppShell project persistence", () => {
     expect(element('[data-testid="cloud-save-error"]').textContent).toContain("Cloud revision conflict");
   });
 
+  it("keeps the closed status entry one line and closes the expanded card with Escape", async () => {
+    await mount();
+    const details = element<HTMLDetailsElement>('[aria-label="Project persistence"]');
+    const summary = element<HTMLElement>('[aria-label="Project persistence"] > summary');
+    // Closed: the summary itself is the compact entry, with both real state nodes.
+    expect(details.open).toBe(false);
+    expect(details.firstElementChild).toBe(summary);
+    expect(summary.querySelectorAll("span")).toHaveLength(2);
+    expect(summary.querySelector('[data-testid="local-save-status"]')?.textContent).toContain("Unsaved");
+    expect(summary.querySelector('[data-testid="cloud-save-status"]')?.textContent).toContain("Not saved to cloud");
+    // Expanded: Escape closes it and returns focus to the summary; the details node
+    // stays the same node, so the state feedback is never unmounted.
+    details.open = true; details.dispatchEvent(new Event("toggle")); await settle();
+    summary.focus();
+    summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+    expect(details.open).toBe(false);
+    expect(document.activeElement).toBe(summary);
+    expect(element('[aria-label="Project persistence"]')).toBe(details);
+    expect(summary.querySelector('[data-testid="local-save-status"]')?.textContent).toContain("Unsaved");
+  });
+
   it("keeps a failed local save visible and allows a real subsequent save", async () => {
     await mount();
     const write = vi.spyOn(window.localStorage, "setItem").mockImplementationOnce(() => { throw new Error("Storage quota exhausted"); });
@@ -97,13 +119,14 @@ describe("AppShell project persistence", () => {
     const original = kind === "future" ? '{"schemaVersion":99,"name":"Future input","unknown":{"keep":true}}' : '{broken input';
     restored = ProjectSession.restoreWithReport({ getItem: () => original, setItem() { throw new Error("Restore must not rewrite input"); } });
     session = restored.session; cloudSave = { status: "readonly" }; await mount();
+    await openAddLayerPanel("group"); await settle();
     const nativeIds = ["project-name", "atlas-status", "single-raster-select", "projection-select", "timeline-slider"];
     const nodes = nativeIds.map(id => element(`#${id}`));
     expect(element('[aria-label="Project persistence"]').textContent).toContain("Read-only");
     expect(element('[data-testid="project-compatibility-issues"]').textContent).toContain(kind === "future" ? "future-schema" : "invalid-json");
     expect(localButton().disabled).toBe(true);
     for (const selector of ['#project-name', 'button[data-action="project.save"]', 'button[data-action="model.select"]',
-      'button[data-action="upload.open"]', '#timeline-slider', '.layer-group-add button[type="submit"]']) {
+      'button[data-action="upload.open"]', '#timeline-slider', 'form[aria-label="Add layer group"] button[type="submit"]']) {
       expect(element<HTMLInputElement | HTMLButtonElement>(selector).disabled, selector).toBe(true);
     }
     expect(element<HTMLButtonElement>('[data-action="ui.accountMenu.toggle"]').disabled).toBe(false);

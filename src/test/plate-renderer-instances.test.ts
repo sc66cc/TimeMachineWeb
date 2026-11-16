@@ -176,6 +176,25 @@ describe("PlateRenderer creation cancellation and cleanup", () => {
     expect(destroyed).toHaveBeenCalledTimes(1); expect(h.primitives.length).toBe(0);
   });
 
+  it("releases the graticule when its population fails before scene insertion", async () => {
+    const h = harness(); const error = new Error("graticule build failed");
+    vi.spyOn(PolylineCollection.prototype, "add").mockImplementationOnce(() => { throw error; });
+    const destroyed = vi.spyOn(PolylineCollection.prototype, "destroy");
+    await expect(PlateRenderer.create(h.viewer, [feature()])).rejects.toBe(error);
+    expect(destroyed).toHaveBeenCalledTimes(1); expect(h.added).toHaveLength(0);
+  });
+
+  it("preserves invalid-geometry warnings and releases an unused outline collection", async () => {
+    const h = harness(); const invalid = feature();
+    invalid.polygons[0]!.exterior = [[0, 0], [1, 1]];
+    const destroyed = vi.spyOn(PolylineCollection.prototype, "destroy");
+    const renderer = await PlateRenderer.create(h.viewer, [invalid], undefined, { graticule: false });
+    expect(renderer.buildStats).toMatchObject({ skippedPolygonCount: 1, polygonCount: 0, plateCount: 0 });
+    expect(renderer.buildStats.warnings[0]).toMatch(/could not triangulate/);
+    expect(destroyed).toHaveBeenCalledTimes(1); expect(h.added).toHaveLength(0);
+    renderer.destroy(); expect(destroyed).toHaveBeenCalledTimes(1);
+  });
+
   it("returns the failed owner only when create cleanup fails, and permits an explicit retry", async () => {
     const h = harness(); const buildError = new Error("progress failed"); const cleanupError = new Error("primitive release failed");
     vi.spyOn(Primitive.prototype, "destroy").mockImplementationOnce(() => { throw cleanupError; });
@@ -230,6 +249,45 @@ describe("PlateRenderer release retry", () => {
     expect(fill.isDestroyed()).toBe(false);
     expect(outlines.isDestroyed()).toBe(true);
     expect(h.postRender.size).toBe(0); expect(h.renderError.size).toBe(0);
+    renderer.destroy();
+    expect(fill.isDestroyed()).toBe(true); expect(h.primitives.length).toBe(0);
+  });
+
+  it("preserves an earlier warming frame when replacement insertion fails before taking its slot", async () => {
+    const h = harness(); const renderer = await PlateRenderer.create(h.viewer, [feature()]);
+    const firstHandle = await renderer.prepareRectangleFrame(50, model);
+    const first = renderer.stageRectangleFrame(firstHandle, 1);
+    const rejected = expect(first).rejects.toThrow(/abort/i);
+    const firstFill = h.added[h.added.length - 2]!;
+    const firstOutlines = h.added[h.added.length - 1]!;
+    const nextHandle = await renderer.prepareRectangleFrame(51, model);
+    const error = new Error("replacement insertion failed");
+    h.add.mockImplementationOnce(() => { throw error; });
+    await expect(renderer.stageRectangleFrame(nextHandle, 2)).rejects.toBe(error);
+    expect(firstFill.isDestroyed()).toBe(false); expect(firstOutlines.isDestroyed()).toBe(false);
+    expect(h.primitives.length).toBe(5); expect(h.postRender.size).toBe(1);
+    renderer.cancelRectangleStaging(); await rejected;
+    expect(firstFill.isDestroyed()).toBe(true); expect(firstOutlines.isDestroyed()).toBe(true);
+    renderer.destroy(); expect(h.primitives.length).toBe(0);
+  });
+
+  it.each(["committed", "retired"] as const)("keeps a failed %s frame release reachable for destroy retry", async (phase) => {
+    const h = harness(); const renderer = await PlateRenderer.create(h.viewer, [feature()]);
+    const prepared = await renderer.prepareRectangleFrame(50, model);
+    const pending = renderer.stageRectangleFrame(prepared, 1);
+    const fill = h.added[h.added.length - 2] as Primitive;
+    const outlines = h.added[h.added.length - 1] as PolylineCollection;
+    // Simulate only the GPU ready/attribute signal; resource allocation,
+    // staging, commitment and ownership release run through the real renderer.
+    Object.defineProperty(fill, "ready", { value: true, configurable: true });
+    vi.spyOn(fill, "getGeometryInstanceAttributes").mockReturnValue({ show: new Uint8Array([0]), color: new Uint8Array(4) });
+    for (const callback of h.postRender) callback();
+    await pending; renderer.commitRectangleFrame(1);
+    if (phase === "retired") renderer.beginFlatSwap(2);
+    const originalDestroy = fill.destroy.bind(fill);
+    vi.spyOn(fill, "destroy").mockImplementationOnce(() => { throw new Error("frame release failed"); }).mockImplementation(originalDestroy);
+    expect(() => phase === "retired" ? renderer.confirmFlatSwap(2) : renderer.restoreGlobeFrame()).toThrow(AggregateError);
+    expect(fill.isDestroyed()).toBe(false); expect(outlines.isDestroyed()).toBe(true);
     renderer.destroy();
     expect(fill.isDestroyed()).toBe(true); expect(h.primitives.length).toBe(0);
   });

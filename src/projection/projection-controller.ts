@@ -201,6 +201,10 @@ export class ProjectionController {
     disconnectedFeatureCount: 0,
   };
   private lastError: ProjectionErrorSnapshot | undefined;
+  /** Set only by the lifecycle renderError listener, so an explicit recovery
+   * may clear it without erasing an unrelated API failure. */
+  private lifecycleError: ProjectionErrorSnapshot | undefined;
+  private removeLifecycleRenderError: (() => void) | undefined;
   /** Mode/source epoch; same-mode queued times do not invalidate active work. */
   private requestGeneration = 0;
   private sourceInvalidated = false;
@@ -222,6 +226,15 @@ export class ProjectionController {
     if (typeof host.viewer.scene.canvas?.addEventListener === "function" && typeof host.viewer.camera.frustum?.clone === "function") {
       this.flatCamera = new FlatMapCamera(host.viewer);
       host.plateRenderer.setFlatPickFilter(position => this.flatCamera!.contains(position));
+    }
+    // Transaction waiters only cover their own request. A native gesture (or a
+    // stopped Widget loop between requests) can fail while no transaction is
+    // active, so the scene error must still reach the published state instead
+    // of leaving the projection reporting ready.
+    if (typeof host.viewer.scene.renderError?.addEventListener === "function") {
+      this.removeLifecycleRenderError = host.viewer.scene.renderError.addEventListener(
+        (_scene: unknown, error: unknown) => this.onLifecycleRenderError(error),
+      );
     }
   }
 
@@ -846,10 +859,40 @@ export class ProjectionController {
     if (this.sourceInvalidated) throw new AgentActionBusyError("Plate source changed or runtime disposed; reload is required.");
   }
 
+  /**
+   * An explicit user recovery (Home/reset) installed a finite pose and its own
+   * matching postRender completed. Only the render error this listener actually
+   * published may be cleared; a later API failure stays.
+   */
+  confirmRenderRecovered(): void {
+    if (this.sourceInvalidated || !this.lifecycleError) return;
+    if (this.lastError !== this.lifecycleError) return;
+    if (this.renderWaiter || this.activeTimeRequest || this.pendingTimeRequest || this.prefetchedTimeRequest) return;
+    this.lifecycleError = undefined;
+    this.lastError = undefined;
+    this.status = "ready";
+    this.publish();
+  }
+
+  private onLifecycleRenderError(error: unknown): void {
+    if (this.sourceInvalidated) return;
+    // An active frame waiter owns this failure and reports it through its own
+    // transaction; publishing here first would race its cancellation state.
+    if (this.renderWaiter) return;
+    const failure = error instanceof Error ? error : new Error(String(error));
+    const snapshot = this.toError(failure);
+    this.lifecycleError = snapshot;
+    this.lastError = snapshot;
+    this.status = "error";
+    this.publish();
+  }
+
   /** Cancels any in-flight work; called when the renderer is torn down. */
   destroy(): void {
     // Close entry points before any native cleanup can throw.
     this.sourceInvalidated = true;
+    this.removeLifecycleRenderError?.();
+    this.removeLifecycleRenderError = undefined;
     this.requestGeneration += 1;
     const cancelledTime = this.cancelTimeRequests();
     this.cancelRenderWaiter();

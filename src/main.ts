@@ -13,6 +13,7 @@ import { createApp, nextTick } from "vue";
 
 import AppShell from "./AppShell.vue";
 import "./style.css";
+import "./vueui/theme.css";
 import {
 	isFeatureValidAtTime,
 	parseGpmlPlatePolygons,
@@ -57,6 +58,7 @@ import {
 	type SingleRasterManifest,
 	type SingleRasterRuntimeState,
 } from "@timemachine/raster-runtime";
+import { cameraPoseIsFinite, GlobeZoomController } from "./ui/globe-zoom-controller";
 import { GeologicalTimeline } from "./ui/geological-timeline";
 import { PerformanceMonitor } from "./ui/performance-monitor";
 import { CameraResetCompletion } from "./projection/camera-reset-completion";
@@ -123,7 +125,6 @@ import {
   ProjectionController,
   type ProjectionModeId,
   type ProjectionSnapshot,
-  type ProjectionTimeCounts,
 } from "./projection";
 import { ProjectLayerType, SystemOpenAPIInvoker } from "@timemachine/generated-api";
 import {
@@ -181,6 +182,7 @@ function requiredElement<T extends Element>(
  */
 let globeSpinInertiaEnabled = true;
 const cancelGlobeMomentum = new WeakMap<Viewer, () => void>();
+const globeZoomControllers = new WeakMap<Viewer, GlobeZoomController>();
 
 function formatTimeBoundary(timeMa: number): string {
 	if (timeMa === Number.POSITIVE_INFINITY) {
@@ -254,6 +256,15 @@ function setCameraHome(viewer: Viewer, callbacks?: { complete: () => void; cance
 		Cartesian3.cross(right, direction, new Cartesian3()),
 		new Cartesian3(),
 	);
+	if (!cameraPoseIsFinite(viewer.camera)) {
+		// A render loop stopped on a corrupt pose cannot be flown out of it.
+		// Install the complete known-finite Home pose directly; the caller's
+		// completion still waits for its own real postRender frame.
+		viewer.camera.setView({ destination, orientation: { direction, up } });
+		viewer.scene.requestRender();
+		callbacks?.complete();
+		return;
+	}
 	viewer.camera.flyTo({
 		destination,
 		orientation: { direction, up },
@@ -274,6 +285,12 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 	controller.inertiaZoom = 0.88;
 	controller.maximumMovementRatio = 0.08;
 	viewer.targetFrameRate = 60;
+
+	// One Globe zoom owner: it disables only the competing native zoom inputs
+	// while the scene is Globe, and restores them for the flat projections.
+	const globeZoom = new GlobeZoomController(viewer);
+	globeZoom.setEnabled(globeSpinInertiaEnabled);
+	globeZoomControllers.set(viewer, globeZoom);
 
 	const canvas = scene.canvas;
 	let settleTimer: number | undefined;
@@ -426,6 +443,8 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 			window.clearTimeout(settleTimer);
 			stopMomentum();
 			cancelGlobeMomentum.delete(viewer);
+			globeZoom.destroy();
+			globeZoomControllers.delete(viewer);
 			canvas.removeEventListener("pointerdown", handlePointerDown);
 			canvas.removeEventListener("wheel", handleWheel);
 			window.removeEventListener("pointermove", handlePointerMove);
@@ -435,8 +454,18 @@ function configureSmoothCameraInteraction(viewer: Viewer): void {
 	);
 }
 
+let creditsLightboxViewport: HTMLElement | undefined;
+
 function createViewer(): Viewer {
+	// Cesium appends its real credits lightbox to this viewport. A body-level
+	// element keeps the popup and its own Close out of the z-index:1 map
+	// container, so the HUD can no longer capture that click.
+	const creditViewport = document.createElement("div");
+	creditViewport.className = "credit-lightbox-viewport";
+	document.body.appendChild(creditViewport);
+	creditsLightboxViewport = creditViewport;
 	const viewer = new Viewer("cesium-container", {
+		creditViewport,
 		animation: false,
 		baseLayer: false,
 		baseLayerPicker: false,
@@ -1667,6 +1696,7 @@ async function main(): Promise<void> {
 		onStateChange: applyProjectionStateToUI,
 		setGlobeInertiaEnabled: (enabled) => {
 			globeSpinInertiaEnabled = enabled;
+			globeZoomControllers.get(viewer)?.setEnabled(enabled);
 			if (!enabled) {
 				cameraResetCompletion.cancel("superseded");
 				cancelGlobeMomentum.get(viewer)?.();
@@ -1692,17 +1722,27 @@ async function main(): Promise<void> {
 			};
 		},
 		restoreGlobeCamera: () => {
-			if (!savedGlobeCamera) {
+			const pose = savedGlobeCamera;
+			const poseIsComplete = pose !== undefined && [
+				...pose.position,
+				...pose.direction,
+				...pose.up,
+			].every((value) => Number.isFinite(value));
+			if (!poseIsComplete) {
+				// Never interpolate a mode return from a captured corrupt pose; fall
+				// back to the complete known Home view instead.
 				setCameraHome(viewer);
+				globeZoomControllers.get(viewer)?.setEnabled(globeSpinInertiaEnabled);
 				return;
 			}
 			viewer.camera.setView({
-				destination: Cartesian3.fromArray(savedGlobeCamera.position),
+				destination: Cartesian3.fromArray(pose.position),
 				orientation: {
-					direction: Cartesian3.fromArray(savedGlobeCamera.direction),
-					up: Cartesian3.fromArray(savedGlobeCamera.up),
+					direction: Cartesian3.fromArray(pose.direction),
+					up: Cartesian3.fromArray(pose.up),
 				},
 			});
+			globeZoomControllers.get(viewer)?.setEnabled(globeSpinInertiaEnabled);
 		},
 		applyGlobeFrame: (timeMa) => {
 			currentTimeState = renderer.updateTime(timeMa, rotationModel);
@@ -1892,6 +1932,7 @@ async function main(): Promise<void> {
 			...[...atlasControllers.values()].map(controller => () => controller.destroy()),
 			...[...rasterControllers.values()].map(controller => () => controller.destroy()),
 			() => cameraResetCompletion.destroy(), () => projectionController?.destroy(),
+			() => { creditsLightboxViewport?.remove(); creditsLightboxViewport = undefined; },
 		]) {
 			try { release(); }
 			catch (error) {
@@ -3267,6 +3308,9 @@ async function main(): Promise<void> {
 					callbacks.complete();
 				}
 			}, { signal: context?.signal });
+			// The reset resolved on its own matching postRender; only that explicit,
+			// actually-rendered recovery may clear a lifecycle renderError.
+			if (projectionController.sceneMode === "globe") projectionController.confirmRenderRecovered();
 			return { data: { projectionId: projectionController.sceneMode, camera: {
 				position: [viewer.camera.positionWC.x, viewer.camera.positionWC.y, viewer.camera.positionWC.z],
 				direction: [viewer.camera.directionWC.x, viewer.camera.directionWC.y, viewer.camera.directionWC.z],
@@ -3752,10 +3796,10 @@ main().catch((error: unknown) => {
 	const loadingTitle = document.querySelector("#loading-title");
 	const loadingDetail = document.querySelector("#loading-detail");
 	const loadingOverlay = document.querySelector("#loading-overlay");
-	loadingTitle && (loadingTitle.textContent = "重建初始化失败");
-	loadingDetail &&
-		(loadingDetail.textContent =
-			error instanceof Error ? error.message : String(error));
+	if (loadingTitle) loadingTitle.textContent = "重建初始化失败";
+	if (loadingDetail) {
+		loadingDetail.textContent = error instanceof Error ? error.message : String(error);
+	}
 	loadingOverlay?.classList.add("has-error");
 	console.error("TimeMachine initialization failed. Inspect the local diagnostics.");
 });

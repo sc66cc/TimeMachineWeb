@@ -39,6 +39,33 @@ export function actionContractDetails(definition: AgentActionDefinition): ApiCon
   }
   if (properties.alpha) properties.alpha = { ...properties.alpha, minimum: 0, maximum: 1 };
   switch (definition.id) {
+    case "ui.addPanel.setVisible": {
+      properties.visible = { type: "boolean", description: "True shows the add panel." };
+      properties.kind = enumString("group", "point", "line", "polygon", "raster", "atlas");
+      result.outputSchema = exactObject({
+        kind: enumString("group", "point", "line", "polygon", "raster", "atlas"),
+        visible: { type: "boolean", enum: [true, false] },
+      });
+      result.examples = [{ input: { visible: true, kind: "point" }, output: { visible: true, kind: "point" } }];
+      break;
+    }
+    case "ui.sidebar.setVisible":
+    case "ui.welcome.setVisible":
+    case "ui.console.setVisible":
+      result.outputSchema = exactObject(
+        { visible: { type: "boolean", description: "Declared visibility after the call." } },
+        "The panel is mounted for the whole session; this only reports its declared visibility.",
+      );
+      break;
+    case "ui.console.clear":
+      result.outputSchema = exactObject({
+        entries: { type: "integer", minimum: 0 },
+        pending: { type: "integer", minimum: 0 },
+      }, "Retained output counters after clearing. A running job keeps running.");
+      break;
+    case "ui.console.selectOutput":
+      result.outputSchema = exactObject({ selected: { type: "boolean", enum: [true] } });
+      break;
     case "project.saveLocal":
       result.outputSchema = exactObject({ savedAt: { type: "string" }, revision: { type: "integer", minimum: 0 } });
       break;
@@ -291,6 +318,92 @@ export function actionContractDetails(definition: AgentActionDefinition): ApiCon
       result.outputSchema = exactObject({ step: enumString("select", "map", "run") });
       result.examples = [{ precondition: "Signed in with ingest capability, upload wizard open, and no ingest job running.",
         input: { step: "select" }, output: { step: "select" } }];
+      break;
+    // Sign-in, catalog, project and upload results are the values their
+    // existing handlers return. Nothing here is invented: each schema below
+    // matches the object literal in the handler and nothing wider.
+    case "auth.login":
+      result.outputSchema = exactObject({
+        accountName: { type: "string", minLength: 1 },
+        signedIn: { type: "boolean", enum: [true] },
+        status: enumString("disabled", "loading", "signed-out", "signed-in", "error"),
+        v2WorkspaceAvailable: { type: "boolean" },
+      }, "Safe session summary after a successful sign-in. The account name is displayed from the response of this call; no token, password or digest is returned.");
+      result.examples = [{ precondition: "Valid credentials for the configured Server.",
+        input: { mode: "account" },
+        output: { accountName: "Example", signedIn: true, status: "signed-in", v2WorkspaceAvailable: true } }];
+      break;
+    case "auth.sendCode": case "auth.logout":
+      result.outputSchema = exactObject({}, "Empty result data; the request must succeed, otherwise the handler raises an auth error.");
+      result.examples = [{ input: {} , output: {} }];
+      break;
+    case "catalog.refresh":
+      result.outputSchema = exactObject({
+        modelCount: { type: "integer", minimum: 0, description: "Models returned in this refresh; may be fewer than total when the Server paginates." },
+        status: enumString("idle", "loading", "ready", "incomplete", "error"),
+        total: { type: "integer", minimum: 0, description: "Server-reported total, not the number of loaded models." },
+      }, "Catalog summary only. This is not PageRO<PlateModelSimpleRO> and does not return model bodies.");
+      result.examples = [{ precondition: "Signed out with a reachable Server; the public catalog loads.",
+        input: {}, output: { modelCount: 12, status: "ready", total: 12 } }];
+      break;
+    case "model.select":
+      result.outputSchema = exactObject({
+        accepted: { type: "boolean", enum: [true] },
+        plateModelId: { type: "integer", minimum: 0, description: "Selected V1 shared model id; 0 when not the active source." },
+        plateModelVersionId: { type: "integer", minimum: 0, description: "Selected V2 model version id; 0 when not the active source." },
+        source: enumString("shared", "v2", "local-demo"),
+      }, "Selection recorded before the scheduled page reload. The model is loaded by the next document.");
+      result.examples = [{ precondition: "The local PALEOMAP demo was explicitly selected.",
+        input: { source: "local-demo" },
+        output: { accepted: true, plateModelId: 0, plateModelVersionId: 0, source: "local-demo" } }];
+      break;
+    case "dataset.select":
+      result.outputSchema = exactObject({ accepted: { type: "boolean", enum: [true] } }, "Selection recorded before the scheduled page reload.");
+      result.examples = [{ precondition: "A V2 workspace is available and the revision id exists.",
+        input: { datasetVersionId: 42 }, output: { accepted: true } }];
+      break;
+    case "upload.open": case "upload.close": case "upload.cancel": case "points.unload":
+      result.outputSchema = exactObject({}, "Empty result data; read the relevant snapshot for the resulting state.");
+      result.examples = [{ input: {}, output: {} }];
+      break;
+    case "upload.run":
+      result.outputSchema = exactObject({
+        accepted: { type: "boolean", enum: [true] },
+        datasetVersionId: { type: "integer", minimum: 0, description: "Dataset version selected by the ingest; the model is loaded by the next document." },
+      }, "The ingest job was accepted; the dataset is selected by the scheduled reload.");
+      result.examples = [{ precondition: "A V2 workspace is available and the upload request is valid.",
+        input: {}, output: { accepted: true, datasetVersionId: 77 } }];
+      break;
+    case "points.setSize":
+      result.outputSchema = exactObject({ pointSize: { type: "number", minimum: POINT_SIZE_MIN_PIXELS, maximum: POINT_SIZE_MAX_PIXELS, description: "Stored point size in pixels, which may be clamped differently from the requested value." } });
+      result.examples = [{ input: { pointSize: 4 }, output: { pointSize: 4 } }];
+      break;
+    case "points.setStyle":
+      result.outputSchema = exactObject({
+        style: { oneOf: [pointStyle, { type: "null" }], description: "Complete stored style expression after the patch was merged, or null when the point layer is absent." },
+      }, "The whole stored expression, not just the requested patch; an omitted field keeps its stored value.");
+      result.examples = [{ precondition: "The point layer exists with its default style.",
+        input: { style: { singleColor: "#12abef" } },
+        output: { style: { colorMode: "plate", filter: { maximumOccurrence: 65535, minimumOccurrence: 0, plateId: null }, occurrenceSizeScale: 1, pointSize: 6, schemaVersion: 1, shape: "circle", singleColor: "#12abef", sizeMode: "fixed" } } }];
+      break;
+    case "project.setName":
+      result.outputSchema = exactObject({ name: { type: "string", minLength: 1, description: "Stored project name after trimming rules were applied." } });
+      result.examples = [{ input: { name: "Cretaceous study" }, output: { name: "Cretaceous study" } }];
+      break;
+    case "project.save":
+      result.outputSchema = exactObject({
+        revisionId: positiveId, revisionNumber: positiveId,
+      }, "Cloud revision actually created by this save. A save that commits remotely but fails to store its local reference fails instead of returning this shape.");
+      result.examples = [{ precondition: "Signed in on a V2 Server with an open cloud project.",
+        input: {}, output: { revisionId: 501, revisionNumber: 7 } }];
+      break;
+    case "project.open":
+      result.outputSchema = exactObject({
+        revisionId: positiveId,
+        contextId: { type: "string", minLength: 1, description: "Local context identity that the opened document is bound to." },
+      }, "The revision was opened locally; the project is applied by the scheduled page reload.");
+      result.examples = [{ precondition: "Signed in on a V2 Server and the revision exists in the project catalog.",
+        input: { revisionId: 501 }, output: { revisionId: 501, contextId: "ctx-example" } }];
       break;
   }
   return result;

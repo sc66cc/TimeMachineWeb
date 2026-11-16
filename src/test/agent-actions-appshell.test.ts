@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -301,28 +301,107 @@ describe("mounted AppShell action facade", () => {
 });
 
 describe("control coverage audit", () => {
-  const source = readFileSync(
-    resolve(process.cwd(), "src/AppShell.vue"),
-    "utf-8",
-  );
+  const shellFiles = [
+    "src/AppShell.vue",
+    ...readdirSync(resolve(process.cwd(), "src/components/vueui/shell"))
+      .filter((name) => name.endsWith(".vue"))
+      .sort()
+      .map((name) => `src/components/vueui/shell/${name}`),
+  ];
+  const consoleFile = "src/components/DevelopmentConsole.vue";
+  const read = (path: string): string => readFileSync(resolve(process.cwd(), path), "utf-8");
   const declared = new Set(
     Object.values(AGENT_ACTIONS) as readonly string[],
   );
-  const buttonTags = [...source.matchAll(/<button\b[^>]*>/g)].map(
-    (match) => match[0],
-  );
-  const boundActions = [
-    ...new Set(
-      [...source.matchAll(/data-action="([\w.\-]+)"/g)].map(
-        (match) => match[1] as string,
-      ),
-    ),
-  ];
 
-  it("binds every button in the template to an action", () => {
-    const unbound = buttonTags.filter((tag) => !tag.includes("data-action"));
+  /**
+   * A control may be local to its component instead of calling a facade action.
+   * This is the complete closed set: console operations keep their own
+   * `data-ui-local` ids (the console drives v2 directly), and the two panel
+   * dismissals only close their own dialog. Anything else must use `data-action`.
+   */
+  const UI_LOCAL_CONTROLS = new Set([
+    "console.toggle",
+    "console.run",
+    "console.clear",
+    "console.selectOutput",
+    "addPanel.close",
+    "welcome.close",
+  ]);
+  /**
+   * The welcome dialog's own Close is a dismissal of that dialog, not a business
+   * entry point; it is allowed by exact tag, not by excluding all `Button`s.
+   * Stale entries fail the audit below.
+   */
+  const VENDOR_LOCAL_DISMISSALS = new Set([
+    '<Button variant="secondary" size="sm" @click="open = false">',
+  ]);
+  /** Local controls whose declared facade equivalent is already implemented. */
+  const LOCAL_ACTION_EQUIVALENTS: Readonly<Record<string, string>> = {
+    "console.toggle": AGENT_ACTIONS.consoleSetVisible,
+    "console.clear": AGENT_ACTIONS.consoleClear,
+    "console.selectOutput": AGENT_ACTIONS.consoleSelectOutput,
+  };
+
+  /**
+   * Native buttons and our own `Button` components. A `Button as-child` is a
+   * wrapper, not a control: the nested native button carries the action and is
+   * audited on its own. Vendor-internal buttons (for example the Dialog close
+   * that both dialogs disable) are not in these files.
+   */
+  function controlTags(source: string): string[] {
+    const tags = [...source.matchAll(/<button\b[^>]*>/g)].map((match) => match[0]);
+    for (const match of source.matchAll(/<Button\b[\s\S]*?>/g)) {
+      if (!/\bas-child\b/.test(match[0])) tags.push(match[0]);
+    }
+    return tags;
+  }
+
+  const shellSources = shellFiles.map(read);
+  const shellControls = shellSources.flatMap(controlTags);
+  const shellActions = shellSources.flatMap((source) =>
+    [...source.matchAll(/data-action="([\w.\-]+)"/g)].map((match) => match[1] as string),
+  );
+  const shellLocals = shellSources.flatMap((source) =>
+    [...source.matchAll(/data-ui-local="([\w.\-]+)"/g)].map((match) => match[1] as string),
+  );
+  const consoleSource = read(consoleFile);
+  const consoleControls = controlTags(consoleSource);
+  const consoleLocals = [...consoleSource.matchAll(/data-ui-local="([\w.\-]+)"/g)].map(
+    (match) => match[1] as string,
+  );
+  const boundActions = [...new Set(shellActions)];
+  const coveredActions = new Set(boundActions);
+  for (const local of [...shellLocals, ...consoleLocals]) {
+    const equivalent = LOCAL_ACTION_EQUIVALENTS[local];
+    if (equivalent) coveredActions.add(equivalent);
+  }
+
+  it("binds every business control to an action or a listed local control", () => {
+    const unbound = [...shellControls, ...consoleControls].filter(
+      (tag) =>
+        !tag.includes("data-action") &&
+        !tag.includes("data-ui-local") &&
+        !VENDOR_LOCAL_DISMISSALS.has(tag),
+    );
     expect(unbound).toEqual([]);
-    expect(buttonTags.length).toBeGreaterThan(40);
+    for (const allowed of VENDOR_LOCAL_DISMISSALS) {
+      expect([...shellControls, ...consoleControls]).toContain(allowed);
+    }
+    const unknownLocal = [...new Set([...shellLocals, ...consoleLocals])].filter(
+      (local) => !UI_LOCAL_CONTROLS.has(local),
+    );
+    expect(unknownLocal).toEqual([]);
+    expect([...shellControls, ...consoleControls].length).toBeGreaterThan(40);
+  });
+
+  it("keeps the console on its explicit local ids", () => {
+    expect(consoleControls.length).toBeGreaterThan(0);
+    for (const tag of consoleControls) {
+      expect(tag).toContain("data-ui-local");
+      expect(tag).not.toContain("data-action");
+    }
+    expect(new Set(consoleLocals)).toEqual(new Set(["console.toggle", "console.run", "console.clear", "console.selectOutput"]));
   });
 
   it("only references declared action ids from the template", () => {
@@ -332,9 +411,22 @@ describe("control coverage audit", () => {
   it("accounts for every declared action id", () => {
     const unbound = [...declared].filter(
       (id) =>
-        !boundActions.includes(id) &&
+        !coveredActions.has(id) &&
         !(GESTURE_ONLY_ACTIONS as ReadonlySet<string>).has(id),
     );
     expect(unbound).toEqual([]);
+  });
+
+  it("binds the six shell controls added with the Vue panels", () => {
+    for (const id of [
+      AGENT_ACTIONS.addPanelSetVisible,
+      AGENT_ACTIONS.consoleSetVisible,
+      AGENT_ACTIONS.consoleClear,
+      AGENT_ACTIONS.consoleSelectOutput,
+      AGENT_ACTIONS.sidebarSetVisible,
+      AGENT_ACTIONS.welcomeSetVisible,
+    ]) {
+      expect(coveredActions.has(id), id).toBe(true);
+    }
   });
 });

@@ -334,12 +334,17 @@ the operational Rectangle (Plate Carrée) MVP. What is and is not delivered:
 
 ## Controls and the action each one maps to
 
-Every button and key input in `AppShell.vue` carries a `data-action` attribute,
-and a test asserts that every button has one and that every declared action is
-either bound to a control or listed as gesture-only below. Where a control only
-changes a value (`#project-name`, the layer checkboxes and opacity sliders, the
-point size field), it calls the same function the action calls, so the UI and
-the API can never write two different values.
+Every business button and key input in `AppShell.vue` and the Vue shell panels
+(`src/components/vueui/shell/*.vue`) carries a `data-action` attribute, and the
+control audit reads all of those templates plus the console rather than only
+`AppShell.vue`. It asserts that every control has either an action or a listed
+local id, and that every declared action is bound, provided by a listed local
+control, or gesture-only below. The development console keeps its own
+`data-ui-local` ids because it drives v2 directly; that set is closed and
+asserted, not a blanket exclusion. Where a control only changes a value
+(`#project-name`, the layer checkboxes and opacity sliders, the point size
+field), it calls the same function the action calls, so the UI and the API can
+never write two different values.
 
 | control | action |
 | --- | --- |
@@ -356,6 +361,14 @@ the API can never write two different values.
 | `#project-name` | `project.setName` |
 | sidebar · Layer tab | `ui.sidebar.select` (`tab: "layers"`) |
 | sidebar · Plate Model tab | `ui.sidebar.select` (`tab: "plate-models"`) |
+| sidebar show/hide | `ui.sidebar.setVisible` |
+| Add layer / group | `ui.addPanel.setVisible` (`visible: true`, optional `kind`) |
+| × Close add panel / Escape | `ui.addPanel.setVisible` (`visible: false`) |
+| welcome panel | `ui.welcome.setVisible` |
+| Console toggle | `ui.console.setVisible` |
+| Console Run / Enter | local console command (`data-ui-local="console.run"`) |
+| Clear output | `ui.console.clear` |
+| Select output | `ui.console.selectOutput` |
 | layer search | `ui.layerSearch.set` |
 | ↥ Upload to Layer | `upload.open` |
 | ◉ Layer Style | `ui.layerStyle.open` |
@@ -842,6 +855,54 @@ Switches the sidebar between the Layer and Plate Model tabs.
 
 Params:
 - `tab` (string) — 'layers' or 'plate-models'.
+
+### `ui.sidebar.setVisible` — Show or hide the sidebar
+
+Shows or hides the sidebar without unmounting it. Hiding removes it from view
+and from the tab order; the map uses the freed width.
+
+Params:
+- `visible` (boolean) — true to show the sidebar.
+
+### `ui.addPanel.setVisible` — Open or close the add-layer panel
+
+Opens or closes the collapsed add layer/group panel and optionally selects one
+of its six forms. Inactive forms are mounted on demand, so selecting `kind` is
+also how a caller reaches that form. The map's native controls stay mounted.
+
+Params:
+- `visible` (boolean) — true to open the panel.
+- `kind` (string, optional) — `group`, `point`, `line`, `polygon`, `raster` or `atlas`.
+
+### `ui.welcome.setVisible` — Show or hide the welcome panel
+
+Shows or hides the welcome dialog. It is closed by default.
+
+Params:
+- `visible` (boolean) — true to show the welcome panel.
+
+### `ui.console.setVisible` — Show or hide the development console
+
+Shows or hides the console panel. Retained output survives closing it.
+
+Params:
+- `visible` (boolean) — true to show the console.
+
+### `ui.console.clear` — Clear the retained console output
+
+Removes this session's retained console output. A running job keeps running;
+use `jobs cancel` (or the command of the same name) to request cancellation.
+
+Params:
+- none
+
+### `ui.console.selectOutput` — Select the retained console output
+
+Focuses and selects the transcript for copying. Fails with `validation` when the
+console is closed or has no output; it never reports a fake success.
+
+Params:
+- none
 
 ### `ui.toolbar.toggle` — Collapse or expand the module toolbar
 

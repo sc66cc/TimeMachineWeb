@@ -67,6 +67,29 @@ describe("camera reset completion", () => {
     h.complete(); h.frame(); await second;
   });
 
+  it("rejects a completion whose target pose is not finite instead of matching NaN", async () => {
+    const h = harness();
+    const p = h.completion.run(h.start);
+    const rejected = expect(p).rejects.toThrow(/non-finite camera pose/);
+    h.camera.positionWC.x = Number.NaN;
+    h.complete();
+    await rejected;
+    expect(h.listeners()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects a frame that renders a non-finite pose after a healthy target", async () => {
+    const h = harness();
+    const p = h.completion.run(h.start);
+    const rejected = expect(p).rejects.toThrow(/not finite after the reset frame/);
+    h.complete();
+    h.camera.directionWC.y = Number.NaN;
+    h.frame();
+    await rejected;
+    expect(h.listeners()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("supports a synchronous flat reset but still waits for its real frame", async () => {
     const h = harness(); let done = false;
     const p = h.completion.run(({ complete }) => complete()).then(() => { done = true; });
